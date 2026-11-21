@@ -893,14 +893,15 @@ class StoresRepository {
             },
           ) as Map<String, dynamic>));
 
-  // ── AI Marketing Sidekick ────────────────────────────────────────────────
+  // ── Zeno, the seller's marketing partner ─────────────────────────────────
   //
   // The answer is built on the server from this store's live listings and
   // recent campaigns; the app sends the question, the chosen platform or
   // products, and the recent turns it is holding in memory. Nothing here is
-  // posted, published or paid for.
+  // posted, published or paid for. The conversation is this session's only -
+  // there is no saved transcript to restore, so the Studio never implies one.
 
-  Future<Result<SidekickReply>> sidekickChat(
+  Future<Result<SidekickReply>> zenoTurn(
     String storeId, {
     required String message,
     String? platform,
@@ -910,7 +911,7 @@ class StoresRepository {
     List<({String role, String text})> history = const [],
   }) =>
       _guard(() async => SidekickReply.fromJson(await _client.post(
-            '/stores/$storeId/marketing/sidekick',
+            '/stores/$storeId/marketing/zeno/turn',
             {
               'message': message.trim(),
               if (platform != null) 'platform': platform,

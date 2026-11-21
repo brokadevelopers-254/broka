@@ -330,6 +330,25 @@ class SidekickIn(BaseModel):
     history: List[SidekickTurnIn] = Field(default_factory=list, max_length=12)
 
 
+class ZenoTurnIn(BaseModel):
+    """One message in Zeno's marketing conversation.
+
+    `history` is the transcript the app holds for this session; the store and
+    its products are never sent from here, they are read on the server for the
+    authenticated owner. Product ids are only a focus hint and are validated
+    against this store's live listings.
+    """
+    message: str = Field(min_length=1, max_length=1200)
+    platform: Optional[Literal["whatsapp", "instagram", "tiktok", "facebook", "x"]] = None
+    product_ids: List[str] = Field(default_factory=list, max_length=6)
+    objective: Optional[Literal[
+        "new_store", "product", "new_stock", "discount", "awareness",
+        "seasonal", "storefront", "enquiries",
+    ]] = None
+    language: Literal["en", "sw"] = "en"
+    history: List[SidekickTurnIn] = Field(default_factory=list, max_length=16)
+
+
 class VideoScriptIn(BaseModel):
     platform: Literal["tiktok", "instagram", "facebook"] = "tiktok"
     kind: Literal["concept", "script", "storyboard", "voice_over"] = "script"
@@ -998,6 +1017,27 @@ async def sidekick_chat(
     """
     await marketing_sidekick_limiter.check_and_record(current_user["id"])
     return await MarketingSidekickService(db).chat(
+        store_id, current_user["id"], body.model_dump(),
+    )
+
+
+@router.post("/{store_id}/marketing/zeno/turn")
+async def zeno_marketing_turn(
+    store_id: str,
+    body: ZenoTurnIn,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """One turn of Zeno's marketing conversation for this seller's store.
+
+    The answer is built from the store, its live listings and the campaigns
+    BROKA counted - loaded for the authenticated owner, never from ids or
+    prices in the body - then checked for claims the catalogue does not
+    support. Structured `sections` are what the app lays out. Owner only, and
+    rate-limited because a configured provider call costs real money.
+    """
+    await marketing_sidekick_limiter.check_and_record(current_user["id"])
+    return await MarketingSidekickService(db).zeno_turn(
         store_id, current_user["id"], body.model_dump(),
     )
 

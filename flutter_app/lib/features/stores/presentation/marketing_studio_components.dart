@@ -2,6 +2,37 @@ part of 'marketing_studio_screen.dart';
 
 const _accent = BrokaColors.neonPurple;
 
+/// Zeno's mark: the little orb that heads every answer. A gradient rather
+/// than an emoji or a stock icon, so the assistant has one identity across
+/// the header, the welcome and each turn.
+class _ZenoMark extends StatelessWidget {
+  const _ZenoMark({this.size = 34});
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            colors: [BrokaColors.gold, _accent],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(size * 0.34),
+          boxShadow: [
+            BoxShadow(
+              color: _accent.withOpacity(0.28),
+              blurRadius: size * 0.5,
+              spreadRadius: -size * 0.15,
+            ),
+          ],
+        ),
+        child: Icon(Icons.auto_awesome_rounded,
+            size: size * 0.48, color: Colors.white),
+      );
+}
+
 Widget _card(
         {Key? key,
         required Widget child,
