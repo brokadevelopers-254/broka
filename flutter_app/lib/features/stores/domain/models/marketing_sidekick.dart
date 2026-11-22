@@ -1,9 +1,13 @@
-// BROKA — AI Marketing Sidekick models.
+// BROKA — Zeno's marketing models.
 //
 // Mirrors backend/api/domains/stores/marketing_sidekick.py. Everything here
-// is reading-side data: the Sidekick's answer, a platform playbook, a video
-// script or a Meta Ads checklist. None of it is a record that something was
-// posted, published or paid for.
+// is reading-side data: Zeno's answer, a platform playbook, a video script or
+// a Meta Ads checklist. None of it is a record that something was posted,
+// published or paid for.
+//
+// Zeno (the seller's marketing partner) is the name sellers see. The classes
+// and endpoints keep the `Sidekick` spelling they shipped with so the
+// server's contract and older builds do not break; no screen uses that word.
 //
 // The honesty rules the payload carries are kept in the models rather than
 // dropped at the edge: [SidekickReply.available] separates a model answer from
@@ -47,14 +51,21 @@ class SidekickProduct {
   final String name;
   final double? price;
   final String? priceLabel;
+  final String? category;
   final MarketingAssetImage? image;
+
+  /// Units the seller recorded, or null when they keep no count. Never
+  /// inferred from a price or a description.
+  final int? availableUnits;
 
   const SidekickProduct({
     required this.id,
     required this.name,
     this.price,
     this.priceLabel,
+    this.category,
     this.image,
+    this.availableUnits,
   });
 
   static SidekickProduct fromJson(Map<String, dynamic> json) => SidekickProduct(
@@ -62,7 +73,38 @@ class SidekickProduct {
         name: json['name'] as String? ?? '',
         price: (json['price'] as num?)?.toDouble(),
         priceLabel: json['price_label'] as String?,
+        category: json['category'] as String?,
         image: _imageFrom(json['image']),
+        availableUnits: (json['available_units'] as num?)?.toInt(),
+      );
+}
+
+/// One block of Zeno's answer, already shaped by the server.
+///
+/// `kind` is `text`, `bullets`, `steps`, `copy` or `next`. A plain answer with
+/// no markup is a single `text` block, so the screen never has to guess at
+/// Markdown it did not ask for.
+@immutable
+class ZenoSection {
+  final String kind;
+  final String title;
+  final String text;
+  final List<String> items;
+
+  const ZenoSection({
+    required this.kind,
+    this.title = '',
+    this.text = '',
+    this.items = const [],
+  });
+
+  bool get isCopy => kind == 'copy';
+
+  static ZenoSection fromJson(Map<String, dynamic> json) => ZenoSection(
+        kind: json['kind'] as String? ?? 'text',
+        title: json['title'] as String? ?? '',
+        text: json['text'] as String? ?? '',
+        items: _strings(json['items']),
       );
 }
 
@@ -114,6 +156,9 @@ class SidekickReply {
   final List<SidekickAction> actions;
   final List<String> suggestions;
 
+  /// The answer laid out as blocks. Always non-empty for a non-empty reply.
+  final List<ZenoSection> sections;
+
   const SidekickReply({
     required this.reply,
     this.provider = 'template',
@@ -123,6 +168,7 @@ class SidekickReply {
     this.products = const [],
     this.actions = const [],
     this.suggestions = const [],
+    this.sections = const [],
   });
 
   static SidekickReply fromJson(Map<String, dynamic> json) => SidekickReply(
@@ -140,6 +186,10 @@ class SidekickReply {
             if (a is Map) SidekickAction.fromJson(a.cast<String, dynamic>()),
         ],
         suggestions: _strings(json['suggestions']),
+        sections: [
+          for (final s in json['sections'] as List? ?? const [])
+            if (s is Map) ZenoSection.fromJson(s.cast<String, dynamic>()),
+        ],
       );
 }
 

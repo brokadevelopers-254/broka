@@ -580,3 +580,264 @@ def test_the_prompt_carries_store_facts_and_the_payment_boundary():
     assert "Instagram" in prompt
     assert "does not process buyer-to-seller payments" in prompt
     assert "Never invent a price" in prompt
+
+
+@pytest.mark.asyncio
+class TestZenoMarketingTurn:
+    """Zeno's conversation: one turn at a time, with the seller's real store.
+
+    The app renders `sections`; these tests hold the server to the contract
+    behind them - a grounded answer, a real conversation history in the prompt,
+    and the same honesty checks the one-shot endpoint had.
+    """
+
+    async def test_a_turn_is_grounded_in_the_catalogue_and_structured(self, client):
+        _, headers = await _register(client)
+        store = await _store(client, headers, name="Zeno Bags", slug="zeno-bags",
+                             store_type="virtual", service_areas=["Nationwide"],
+                             description="Handmade leather bags.")
+        listing = await _listing(client, headers, store["id"], name="Black Leather Handbag",
+                                 price=4500, category="Fashion")
+
+        r = await client.post(
+            f"/stores/{store['id']}/marketing/zeno/turn",
+            json={"message": "Which product should I promote first?"},
+            headers=headers,
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["source"] == "guidance"
+        assert body["available"] is False
+        assert "Zeno Bags" in body["reply"]
+        assert "Black Leather Handbag" in body["reply"]
+        assert "4,500" in body["reply"]
+        # Every answer is a list of blocks the app can lay out, never a wall.
+        assert body["sections"]
+        assert {block["kind"] for block in body["sections"]} <= {
+            "text", "bullets", "steps", "copy", "next"}
+        assert body["sections"][0]["kind"] == "text"
+        assert body["sections"][0]["text"]
+        # The product carries only what the catalogue says.
+        product = body["products"][0]
+        assert product["id"] == listing["id"]
+        assert product["available_units"] is None  # the seller keeps no count
+        assert body["suggestions"]
+        assert "Black Leather Handbag" in " ".join(body["suggestions"])
+
+    async def test_follow_up_turns_send_the_conversation_to_the_model(
+            self, client, monkeypatch):
+        _, headers = await _register(client)
+        store = await _store(client, headers, name="Thread Shop", slug="thread-shop",
+                             store_type="virtual", service_areas=["Nairobi"])
+        await _listing(client, headers, store["id"], name="Black Leather Handbag",
+                       price=4500, category="Fashion")
+        seen = {}
+
+        async def model(prompt, reply_tokens=900):
+            seen["prompt"] = prompt
+            return "gemini", (
+                "The black one is the right first product.\n\n"
+                "- It is live and priced at KES 4,500.\n"
+                "- Photograph it in daylight.\n\n"
+                "DRAFT:\nBlack Leather Handbag - KES 4,500\nMessage us to order.\n\n"
+                "NEXT: Open Creative Studio to make the poster."
+            )
+
+        monkeypatch.setattr(marketing_module, "_provider_available", lambda: "gemini")
+        monkeypatch.setattr(sidekick, "_ask_model", model)
+
+        body = (await client.post(
+            f"/stores/{store['id']}/marketing/zeno/turn",
+            json={
+                "message": "The black leather one",
+                "history": [
+                    {"role": "user", "text": "I want to promote my handbags"},
+                    {"role": "assistant", "text": "Which of your handbags?"},
+                ],
+            },
+            headers=headers,
+        )).json()
+
+        prompt = seen["prompt"]
+        # The thread is in the prompt, so "the black leather one" has a subject.
+        assert "I want to promote my handbags" in prompt
+        assert "Which of your handbags?" in prompt
+        assert "Zeno:" in prompt and "Seller:" in prompt
+        assert "Black Leather Handbag" in prompt
+        assert "Thread Shop" in prompt
+        assert "does not process buyer-to-seller payments" in prompt
+        assert "Never invent a price" in prompt
+
+        assert body["source"] == "model" and body["available"] is True
+        kinds = [block["kind"] for block in body["sections"]]
+        assert kinds == ["text", "bullets", "copy", "next"]
+        assert body["sections"][2]["text"].startswith("Black Leather Handbag - KES 4,500")
+        assert body["sections"][3]["text"].startswith("Open Creative Studio")
+
+    async def test_an_invented_discount_falls_back_to_honest_guidance(
+            self, client, monkeypatch):
+        _, headers = await _register(client)
+        store = await _store(client, headers, name="Discount Shop", slug="discount-shop",
+                             store_type="virtual", service_areas=["Nairobi"])
+        await _listing(client, headers, store["id"], name="Sun Hat", price=900,
+                       category="Fashion")
+
+        async def inventing(prompt, reply_tokens=900):
+            return "gemini", "Post the Sun Hat with 30% off this weekend."
+
+        monkeypatch.setattr(marketing_module, "_provider_available", lambda: "gemini")
+        monkeypatch.setattr(sidekick, "_ask_model", inventing)
+
+        body = (await client.post(
+            f"/stores/{store['id']}/marketing/zeno/turn",
+            json={"message": "How do I sell the Sun Hat?"},
+            headers=headers,
+        )).json()
+        assert body["available"] is False
+        assert "30%" not in body["reply"]
+        assert "do not support" in body["fallback_reason"]
+        assert "Sun Hat" in body["reply"]
+        # The fallback is still a structured answer.
+        assert body["sections"]
+
+    async def test_another_seller_cannot_open_this_conversation(self, client):
+        _, owner = await _register(client)
+        _, other = await _register(client)
+        store = await _store(client, owner, name="Zeno Private", slug="zeno-private",
+                             store_type="virtual", service_areas=["Nairobi"])
+        r = await client.post(
+            f"/stores/{store['id']}/marketing/zeno/turn",
+            json={"message": "What should I post?"},
+            headers=other,
+        )
+        assert r.status_code == 403
+        assert (await client.post(
+            f"/stores/{store['id']}/marketing/zeno/turn",
+            json={"message": "What should I post?"},
+        )).status_code == 401
+
+    async def test_a_product_from_another_store_is_refused(self, client):
+        _, mine = await _register(client)
+        _, other = await _register(client)
+        store = await _store(client, mine, name="Zeno Action", slug="zeno-action",
+                             store_type="virtual", service_areas=["Nairobi"])
+        theirs = await _store(client, other, name="Zeno Other", slug="zeno-other",
+                              store_type="virtual", service_areas=["Nairobi"])
+        not_mine = await _listing(client, other, theirs["id"], name="Not Mine")
+        r = await client.post(
+            f"/stores/{store['id']}/marketing/zeno/turn",
+            json={"message": "Promote this", "product_ids": [not_mine["id"]]},
+            headers=mine,
+        )
+        assert r.status_code == 400
+        assert "aren't in this store" in r.json()["detail"]
+
+    async def test_a_product_with_no_recorded_stock_says_so(self, client):
+        _, headers = await _register(client)
+        store = await _store(client, headers, name="Stock Shop", slug="stock-shop",
+                             store_type="virtual", service_areas=["Nairobi"])
+        await _listing(client, headers, store["id"], name="Water Bottle", price=700)
+        body = (await client.post(
+            f"/stores/{store['id']}/marketing/zeno/turn",
+            json={"message": "Which product should I promote?"},
+            headers=headers,
+        )).json()
+        # The seller keeps no count, so Zeno has no number to repeat.
+        assert body["products"][0]["available_units"] is None
+
+
+def test_stock_is_only_stated_when_the_seller_records_it():
+    assert sidekick._stock_line(None) == "stock not stated"
+    assert sidekick._stock_line(0) == "none available"
+    assert sidekick._stock_line(4) == "4 available"
+
+
+def test_zeno_store_lines_carry_stock_and_delivery_only_when_known():
+    class FakeStore:
+        name = "Lines Shop"
+        category = "Home"
+        description = "Homeware."
+        store_type = "physical"
+        county = "Nairobi"
+        subcounty = "Kilimani"
+        service_areas = '["Nationwide"]'
+        delivery_note = "Courier within two days."
+        accepting_orders = True
+
+    tracked = [{
+        "id": "l1", "name": "Clay Pot", "price": 1200.0, "category": "Home",
+        "description": "Hand-thrown pot.", "available_units": 4,
+    }]
+    untracked = [{**tracked[0], "available_units": None}]
+    lines = sidekick._zeno_store_lines(FakeStore(), tracked, [])
+    assert "4 available" in lines
+    assert "Courier within two days." in lines
+    assert "Nationwide" in lines
+    assert "stock not stated" in sidekick._zeno_store_lines(FakeStore(), untracked, [])
+
+
+def test_a_resume_of_previous_copy_is_kept_as_one_draft_block():
+    """'Make it shorter' answers are copy, not a new list of tips: the DRAFT
+    block reaches the app as pasteable text with its line breaks intact."""
+    blocks = sidekick._sections(
+        "Here is a shorter version.\n\nDRAFT:\nBlack bag - KES 4,500\nMessage us.\n\nNEXT: Copy it."
+    )
+    assert [b["kind"] for b in blocks] == ["text", "copy", "next"]
+    assert blocks[1]["text"] == "Black bag - KES 4,500\nMessage us."
+    assert blocks[1]["title"] == "Ready to paste"
+
+
+def test_an_answer_without_markup_still_renders():
+    blocks = sidekick._sections("Just one honest paragraph about the store.")
+    assert blocks == [{"kind": "text", "title": "", "items": [],
+                       "text": "Just one honest paragraph about the store."}]
+
+
+def test_a_platform_in_the_conversation_picks_its_playbook():
+    assert sidekick._platform_in("Should I use TikTok for this?") == "tiktok"
+    assert sidekick._platform_in("write it for IG") == "instagram"
+    assert sidekick._platform_in("How do I sell more?") is None
+    assert sidekick._platform_in("Post it on WhatsApp") == "whatsapp"
+
+
+@pytest.mark.asyncio
+async def test_a_named_platform_brings_its_playbook_and_tools(client):
+    _, headers = await _register(client)
+    store = await _store(client, headers, name="Zeno Playbook Shop", slug="zeno-playbook-shop",
+                         store_type="virtual", service_areas=["Nairobi"])
+    await _listing(client, headers, store["id"], name="Ankara Dress", price=2800,
+                   category="Fashion")
+    body = (await client.post(
+        f"/stores/{store['id']}/marketing/zeno/turn",
+        json={"message": "Should I use Instagram for this dress?"},
+        headers=headers,
+    )).json()
+    assert body["platform"] == "instagram"
+    # The answer uses the platform's own guidance, not WhatsApp's.
+    assert "Instagram" in body["reply"]
+    creative = next(a for a in body["actions"] if a["type"] == "creative_studio")
+    assert creative["platform"] == "instagram"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_provider_falls_through_to_the_other(monkeypatch):
+    """A provider outage is not a dead end while another is configured, and
+    the turn reports the provider that actually answered."""
+
+    async def broken(prompt, reply_tokens=900):
+        raise RuntimeError("Gemini HTTP 503")
+
+    async def good(prompt, reply_tokens=900):
+        return "DeepSeek answer."
+
+    monkeypatch.setattr(marketing_module, "_provider_available", lambda: "gemini")
+    monkeypatch.setattr(sidekick, "_gemini_text", broken)
+    monkeypatch.setattr(sidekick, "_deepseek_text", good)
+    class FakeSettings:
+        deepseek_api_key = "test-key"
+
+    monkeypatch.setattr(sidekick, "settings", FakeSettings())
+
+    provider, text = await sidekick._ask_model("prompt")
+    assert provider == "deepseek"
+    assert text == "DeepSeek answer."

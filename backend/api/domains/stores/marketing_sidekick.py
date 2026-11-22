@@ -1,15 +1,22 @@
-"""The AI Marketing Sidekick: practical marketing guidance for a seller's own
-store, and the guided tools that turn advice into action.
+"""Zeno's marketing conversation: practical guidance for a seller's own store,
+and the guided tools that turn advice into action.
+
+The endpoint and class names keep the `Sidekick` spelling they shipped with;
+the assistant sellers meet is Zeno.
 
 What this module is for
 -----------------------
 The Marketing Studio already writes platform-ready campaigns from the
 seller's real catalogue (`api/domains/stores/marketing.py`). This module adds
-the conversation in front of it: a seller asks "how do I market this?" or
-"what should I post this week?", and gets an answer built from their store,
-their live products and their recent campaigns - plus buttons that open the
-Creative Studio, a platform guide, a script builder or Meta Ads guidance with
-the same product already selected.
+the conversation in front of it: a seller asks "which product should I promote
+first?" or "make it shorter", and gets an answer built from their store, their
+live products and their recent campaigns - plus buttons that open the Creative
+Studio, a platform guide, a script builder or Meta Ads guidance with the same
+product already selected.
+
+One turn (`zeno_turn`) is the same prompt and the same checks as the original
+one-shot endpoint (`chat`), which now delegates here so older app builds get
+the same grounded answers.
 
 Boundaries it keeps
 -------------------
@@ -47,7 +54,7 @@ from typing import Optional
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import gemini
@@ -55,15 +62,23 @@ from api.core.config import settings
 from api.database import Listing, ListingStatus
 from api.domains.listings.paid import is_live
 from api.domains.stores import marketing
-from api.models.marketing import MarketingCampaign
+from api.models.marketing import MarketingCampaign, MarketingCampaignEvent
 from api.models.store import Store
 
 logger = logging.getLogger(__name__)
 
 MAX_MESSAGE = 1200
-MAX_HISTORY_TURNS = 12
+# Zeno follows a thread: a seller who named a product four turns ago must not
+# have to name it again, so more of the conversation is carried than the old
+# one-shot Sidekick needed.
+MAX_HISTORY_TURNS = 16
 MAX_HISTORY_CHARS = 2000
 MAX_PRODUCTS = 6
+# What the model may read about the catalogue in one turn. Wider than the
+# three products an answer may cite: "which of my products first?" is a
+# question about the shop, and a six-item window made Zeno answer from
+# whatever happened to be newest.
+CONTEXT_PRODUCTS = 10
 
 VIDEO_PLATFORMS = ("tiktok", "instagram", "facebook")
 VIDEO_KINDS = ("concept", "script", "storyboard", "voice_over")
@@ -477,6 +492,32 @@ def _preferred_platforms(store: Store) -> list[str]:
     return ["whatsapp", "facebook", "instagram"]
 
 
+# Words that name a platform in a seller's own sentence. The playbooks behind
+# them are supporting knowledge for Zeno, not pages the seller has to open:
+# "should I use TikTok or Instagram?" gets an answer built from both.
+_PLATFORM_WORDS = (
+    ("whatsapp", re.compile(r"\bwhatsapp\b|\bwa\b", re.IGNORECASE)),
+    ("instagram", re.compile(r"\binstagram\b|\big\b|\breels?\b", re.IGNORECASE)),
+    ("tiktok", re.compile(r"\btik\s?tok\b", re.IGNORECASE)),
+    ("facebook", re.compile(r"\bfacebook\b|\bfb\b", re.IGNORECASE)),
+    ("x", re.compile(r"\btwitter\b|\bx\.com\b|\bon x\b", re.IGNORECASE)),
+)
+
+
+def _platform_in(text: str) -> Optional[str]:
+    """The first platform named in a sentence, or None.
+
+    Used only to choose which playbook the prompt carries and which tools the
+    answer offers. It never changes a product fact, and a question that names
+    two platforms still gets Zeno's own comparison - the first match only
+    picks the starting playbook.
+    """
+    for platform, pattern in _PLATFORM_WORDS:
+        if pattern.search(text or ""):
+            return platform
+    return None
+
+
 def _premises(store: Store) -> Optional[str]:
     if (store.store_type or "physical") == "virtual":
         return None
@@ -512,6 +553,36 @@ async def _owned_store(db: AsyncSession, store_id: str, requester_id: str) -> St
     return await StoreService(db).get_owned(store_id, requester_id)
 
 
+async def _available_units(db: AsyncSession, ids: list[str]) -> dict[str, Optional[int]]:
+    """What the store's own stock record says, per listing.
+
+    Read from `listings` rather than inferred from a price or a description:
+    Zeno may say a product has units left only when the seller actually keeps
+    a count, and must say "not stated" otherwise (stock_tracked is the seller
+    turning that on - STORE_ORDERS.md).
+    """
+    if not ids:
+        return {}
+    rows = (await db.execute(
+        select(Listing.id, Listing.quantity, Listing.stock_tracked, Listing.stock_reserved)
+        .where(Listing.id.in_(ids))
+    )).all()
+    out: dict[str, Optional[int]] = {}
+    for listing_id, quantity, tracked, reserved in rows:
+        if quantity is None:
+            out[listing_id] = None
+        elif tracked:
+            out[listing_id] = max(0, int(quantity) - int(reserved or 0))
+        else:
+            out[listing_id] = int(quantity)
+    return out
+
+
+async def _with_stock(db: AsyncSession, products: list[dict]) -> list[dict]:
+    stock = await _available_units(db, [p["id"] for p in products])
+    return [{**p, "available_units": stock.get(p["id"])} for p in products]
+
+
 async def _top_products(db: AsyncSession, store: Store, limit: int = MAX_PRODUCTS) -> list[dict]:
     """The seller's newest live products, loaded through the campaign
     module's loader so promotion eligibility is checked in exactly one
@@ -528,18 +599,37 @@ async def _top_products(db: AsyncSession, store: Store, limit: int = MAX_PRODUCT
     if not ids:
         return []
     try:
-        return await marketing._load_products(db, store, ids)
+        return await _with_stock(db, await marketing._load_products(db, store, ids))
     except HTTPException:
         return []
 
 
-async def _selected_products(db: AsyncSession, store: Store, product_ids: list[str]) -> list[dict]:
+async def _selected_products(db: AsyncSession, store: Store, product_ids: list[str],
+                             limit: int = MAX_PRODUCTS) -> list[dict]:
     if not product_ids:
-        return await _top_products(db, store)
-    return await marketing._load_products(db, store, product_ids)
+        return await _top_products(db, store, limit=limit)
+    products = await marketing._load_products(db, store, product_ids)
+    return await _with_stock(db, products)
+
+
+async def _active_listing_count(db: AsyncSession, store: Store) -> int:
+    return (await db.execute(
+        select(func.count(Listing.id)).where(
+            Listing.store_id == store.id,
+            Listing.seller_id == store.owner_id,
+            Listing.status == ListingStatus.active.value,
+        )
+    )).scalar_one()
 
 
 async def _campaign_activity(db: AsyncSession, store: Store) -> list[dict]:
+    """The seller's last few campaigns, with what BROKA actually observed.
+
+    Counts are the same rows the Studio's own screens show: link visits,
+    downloads and shares. They are never impressions, reach, ad spend, sales
+    or revenue, and the prompt says so - a model left to interpret a bare
+    number will call it "results".
+    """
     rows = (await db.execute(
         select(MarketingCampaign).where(
             MarketingCampaign.store_id == store.id,
@@ -547,6 +637,16 @@ async def _campaign_activity(db: AsyncSession, store: Store) -> list[dict]:
             MarketingCampaign.deleted_at.is_(None),
         ).order_by(MarketingCampaign.created_at.desc()).limit(3)
     )).scalars().all()
+    ids = [row.id for row in rows]
+    observed: dict[str, dict[str, int]] = {}
+    if ids:
+        for campaign_id, kind, total in (await db.execute(
+            select(MarketingCampaignEvent.campaign_id, MarketingCampaignEvent.kind,
+                   func.sum(MarketingCampaignEvent.count))
+            .where(MarketingCampaignEvent.campaign_id.in_(ids))
+            .group_by(MarketingCampaignEvent.campaign_id, MarketingCampaignEvent.kind)
+        )).all():
+            observed.setdefault(campaign_id, {})[kind] = int(total or 0)
     out = []
     for row in rows:
         try:
@@ -558,6 +658,7 @@ async def _campaign_activity(db: AsyncSession, store: Store) -> list[dict]:
             "objective": row.objective,
             "platforms": [p for p in platforms if isinstance(p, str)],
             "status": row.status,
+            "observed": observed.get(row.id, {}),
             "created_at": row.created_at.isoformat() if row.created_at else None,
         })
     return out
@@ -657,9 +758,23 @@ async def _deepseek_text(prompt: str, reply_tokens: int = 900) -> str:
 
 
 async def _ask_model(prompt: str, reply_tokens: int = 900) -> tuple[str, str]:
+    """One answer from the first provider that works.
+
+    Gemini is tried first when both are configured, then DeepSeek. A provider
+    that fails (timeout, 5xx, empty answer) is not allowed to take the turn
+    with it while the other is available - and the provider that actually
+    answered is what the turn reports, so a fallback is never attributed to
+    the one that failed.
+    """
     provider = marketing._provider_available()
     if provider == "gemini":
-        return provider, await _gemini_text(prompt, reply_tokens)
+        try:
+            return provider, await _gemini_text(prompt, reply_tokens)
+        except Exception as exc:  # noqa: BLE001 - the second provider is next
+            if not settings.deepseek_api_key:
+                raise
+            logger.warning("[sidekick] gemini failed (%s); trying deepseek", exc)
+            return "deepseek", await _deepseek_text(prompt, reply_tokens)
     if provider == "deepseek":
         return provider, await _deepseek_text(prompt, reply_tokens)
     raise RuntimeError("no AI provider configured")
@@ -713,40 +828,224 @@ def _platform_block(platform: Optional[str]) -> str:
     )
 
 
-def _chat_prompt(store: Store, products: list[dict], campaigns: list[dict],
+def _stock_line(units: Optional[int]) -> str:
+    if units is None:
+        return "stock not stated"
+    if units <= 0:
+        return "none available"
+    return f"{units} available"
+
+
+def _zeno_store_lines(store: Store, products: list[dict], campaigns: list[dict],
+                      total_active: Optional[int] = None) -> str:
+    """Zeno's business knowledge, assembled from the seller's own records.
+
+    Every line is read from the database on this request: the store row, the
+    campaigns BROKA counted, and listings the store may actually promote.
+    Nothing here is a cached catalogue, and no client-supplied price, title or
+    availability reaches the prompt.
+    """
+    virtual = (getattr(store, "store_type", None) or "physical") == "virtual"
+    location = "online (no shop)" if virtual else (_premises(store) or "Kenya (no town stated)")
+    lines = [
+        f"Store: {store.name}",
+        f"Kind: {'online only, no shop to visit' if virtual else 'physical shop'}",
+        f"Sells: {store.category or 'general goods'}",
+        f"Location: {location}",
+        f"Delivers to: {_coverage(store) or 'not stated'}",
+        f"Delivery note: {(getattr(store, 'delivery_note', None) or 'not stated')}",
+        f"Store description: {(store.description or '(none)').strip()[:400]}",
+    ]
+    if not getattr(store, "accepting_orders", True):
+        lines.append("Store status: not accepting new orders right now.")
+    if products:
+        if total_active and total_active > len(products):
+            lines.append(
+                f"Live products ({len(products)} newest of {total_active} active "
+                "listings; the ONLY product facts you may use - if the seller names "
+                "one that is not here, say you cannot see it and ask them to pick from "
+                "the ones above):"
+            )
+        else:
+            lines.append("Live products (the ONLY product facts you may use):")
+        for product in products:
+            lines.append("- " + " · ".join(b for b in [
+                product["name"],
+                _price(product) or "",
+                product.get("category") or "",
+                _stock_line(product.get("available_units")),
+                "has a product photo" if product.get("image") else "no photo yet",
+                (product.get("description") or "")[:200],
+            ] if b))
+    else:
+        lines.append("Live products: none yet.")
+    if campaigns:
+        lines.append(
+            "Recent campaigns, and what BROKA counted (link visits, downloads and "
+            "shares - never impressions, sales or revenue):"
+        )
+        for campaign in campaigns:
+            observed = ", ".join(
+                f"{kind} {count}" for kind, count in sorted((campaign.get("observed") or {}).items())
+            ) or "nothing counted yet"
+            lines.append(
+                f"- {campaign['title']} "
+                f"({OBJECTIVE_LABELS.get(campaign['objective'], campaign['objective'])}; "
+                f"{', '.join(campaign['platforms']) or 'no platform'}; "
+                f"{campaign['status']}; {observed})"
+            )
+    else:
+        lines.append("Recent campaigns: none.")
+    return "\n".join(lines)
+
+
+def _zeno_prompt(store: Store, products: list[dict], campaigns: list[dict],
                  platform: Optional[str], history: list[dict], message: str,
-                 language: str) -> str:
+                 language: str, total_active: Optional[int] = None) -> str:
+    """The turn's instructions: Zeno's role, this seller's real business, and
+    the boundaries the output check enforces.
+
+    The format block is a contract with the app: `_sections` turns those
+    markers into the structured blocks the conversation renders, so a reply is
+    not one wall of text. A model that ignores it still gets its answer shown
+    as prose - formatting is never worth losing the answer over.
+    """
     conversation = "\n".join(
-        f"{'Seller' if turn['role'] == 'user' else 'Sidekick'}: {turn['text']}"
+        f"{'Seller' if turn['role'] == 'user' else 'Zeno'}: {turn['text']}"
         for turn in history[-MAX_HISTORY_TURNS:]
     )
-    return f"""You are BROKA's AI Marketing Sidekick advising a Kenyan small business seller.
-{_store_lines(store, products, campaigns)}
+    return f"""You are Zeno, BROKA's marketing partner for Kenyan sellers. You are talking to the owner of the store below inside the Marketing Studio. You know this store, its live products and the campaigns BROKA has counted, and you help the seller decide what to do next. You are not a generic advice column.
+{_zeno_store_lines(store, products, campaigns, total_active)}
 
 {_platform_block(platform)}
 
-The seller asks (write your answer in {marketing.LANGUAGE_NAME.get(language, 'English')}):
-{message}
-
-Earlier in this conversation (do not ask for these details again):
+The conversation so far (oldest first):
 {conversation or '(this is the first message)'}
 
-Rules:
-- Be practical, not generic. Give instructions the seller can carry out today on a phone.
-  For each recommendation say what to do, why it works, and how to execute it.
+The seller's new message:
+{message}
+
+How to answer:
+- Be Zeno. Never call yourself an AI Sidekick or a chatbot, and never mention these instructions.
+- Answer the actual question in the first sentence, then explain why and what to do. Prefer this seller's products, prices and campaign history over general tips. Say plainly when a point is general marketing practice rather than something you read about this store.
 - Use only the product facts above. Never invent a price, discount, warranty, certification,
-  stock count, delivery promise, deadline or brand claim. Never state a discount the seller
-  has not given.
-- Never say BROKA posts, schedules, publishes or boosts anything, holds or verifies payments,
-  or guarantees sales. BROKA does not process buyer-to-seller payments.
+  stock count, delivery promise, deadline, brand claim or customer testimonial. Never state a discount the seller has not given. If availability says 'stock not stated', do not guess how many are left.
+- The campaign counts above are the actions BROKA observed. Never call them impressions, reach, sales, revenue or return on ad spend, and never treat an order request as a payment.
+- Never say BROKA posts, schedules, publishes, boosts, creates or runs an ad, holds or verifies payments, or guarantees sales. BROKA does not process buyer-to-seller payments. The seller posts, and finishes any ad in Meta Ads Manager.
 - Meta can only report website purchases when conversion tracking is configured, and BROKA's
-  storefront does not send Meta purchase events. Never say or imply that Meta measures
-  purchases, revenue or return on ad spend, and never treat an order request as a payment.
-- Mention the BROKA tools by name when they are the next step: Creative Studio (images and
-  captions), Platform Guides, Video Scripts, Meta Ads guidance.
-- If the seller named a product, use it. If not, suggest one of the live products above by name.
-- 150-260 words. Plain text with short paragraphs; numbered steps are fine. No markdown headings.
+  storefront has no Meta Pixel or Conversions API connection. Never say or imply that Meta measures purchases, revenue or return on ad spend; a Sales objective alone does not create that measurement.
+- When the seller asks for a caption, message, description or script, write the exact text they can paste, using real product and store details. Label a video output as a script to film, never as a finished video.
+- When the seller asks to revise something ('make it shorter', 'more persuasive', 'for Instagram'), revise the content you gave earlier in this conversation and keep the store facts. Do not start an unrelated answer.
+- If you need one fact you do not have, ask one short question and stop. Do not fill the gap with a guess.
+- Mention a BROKA tool by name when it is the next step: Creative Studio, Campaigns, Video Scripts, Meta Ads guidance.
+- Write in {marketing.LANGUAGE_NAME.get(language, 'English')}.
+
+Format: plain text, no markdown (#, *, **).
+- 1-2 sentences that answer directly.
+- Then 3-5 lines starting with "- ", or numbered steps "1. " when the order matters.
+- For text the seller can post, put a line "DRAFT:" and then only the copy on the following lines.
+- Optionally finish with one line starting "NEXT:" naming one next step.
+- At most 220 words.
 """
+
+
+def _chat_prompt(store: Store, products: list[dict], campaigns: list[dict],
+                 platform: Optional[str], history: list[dict], message: str,
+                 language: str) -> str:
+    """The Zeno prompt under its old name, for callers and tests written
+    before the Studio became Zeno's conversation."""
+    return _zeno_prompt(store, products, campaigns, platform, history, message, language)
+
+
+_NUMBERED_RE = re.compile(r"^\s*(\d{1,2})[.)]\s+(.*)$")
+_BULLET_RE = re.compile(r"^\s*[-•]\s+(.*)$")
+_DRAFT_RE = re.compile(r"^\s*" + r"\**DRAFT:\**" + r"\s*(.*)$", re.IGNORECASE)
+_NEXT_RE = re.compile(r"^\s*" + r"\**NEXT:\**" + r"\s*(.*)$", re.IGNORECASE)
+
+
+def _sections(text: str) -> list[dict]:
+    """Zeno's answer as blocks the app can lay out with a visual hierarchy.
+
+    The model is asked for a lead, bullets or steps, an optional DRAFT block
+    and an optional NEXT line. This parser is deliberately forgiving: an
+    answer that ignores the format is one prose block, never a lost reply.
+    """
+    blocks: list[dict] = []
+    paragraph: list[str] = []
+    items: list[str] = []
+    item_kind: Optional[str] = None
+    copy_lines: list[str] = []
+    copy_open = False
+
+    def add(kind: str, *, title: str = "", body: str = "", values: Optional[list[str]] = None):
+        if len(blocks) >= 12:
+            return
+        blocks.append({"kind": kind, "title": title, "text": body,
+                       "items": values or []})
+
+    def flush_paragraph():
+        nonlocal paragraph
+        joined = " ".join(line.strip() for line in paragraph).strip()
+        paragraph = []
+        if joined:
+            add("text", body=joined)
+
+    def flush_items():
+        nonlocal items, item_kind
+        if items:
+            add(item_kind or "bullets", values=items[:20])
+        items, item_kind = [], None
+
+    def flush_copy():
+        nonlocal copy_lines, copy_open
+        body = "\n".join(copy_lines).strip("\n")
+        copy_lines = []
+        copy_open = False
+        if body.strip():
+            add("copy", title="Ready to paste", body=body)
+
+    for raw in (text or "").splitlines():
+        line = raw.replace("**", "").rstrip()
+        draft = _DRAFT_RE.match(line)
+        if draft:
+            flush_paragraph()
+            flush_items()
+            copy_open = True
+            copy_lines = [draft.group(1)] if draft.group(1).strip() else []
+            continue
+        nxt = _NEXT_RE.match(line)
+        if nxt:
+            flush_paragraph()
+            flush_items()
+            flush_copy()
+            if nxt.group(1).strip():
+                add("next", title="Next step", body=nxt.group(1).strip())
+            continue
+        if copy_open:
+            copy_lines.append(line)
+            continue
+        if not line.strip():
+            flush_paragraph()
+            flush_items()
+            continue
+        numbered = _NUMBERED_RE.match(line)
+        bullet = _BULLET_RE.match(line)
+        if numbered or bullet:
+            flush_paragraph()
+            wanted = "steps" if numbered else "bullets"
+            if item_kind not in (None, wanted):
+                flush_items()
+            item_kind = wanted
+            items.append((numbered or bullet).group(2 if numbered else 1).strip())
+            continue
+        flush_items()
+        if line.lstrip().startswith("#"):
+            line = line.lstrip("# ").strip()
+        paragraph.append(line)
+    flush_paragraph()
+    flush_items()
+    flush_copy()
+    return blocks
 
 
 def _video_prompt(store: Store, products: list[dict], platform: str, kind: str,
@@ -896,20 +1195,26 @@ def _actions(store: Store, products: list[dict], platform: Optional[str],
     return out
 
 
-def _suggestions(platform: Optional[str], has_products: bool, store: Store) -> list[str]:
+def _suggestions(platform: Optional[str], has_products: bool, store: Store,
+                 products: Optional[list[dict]] = None) -> list[str]:
+    """What the seller might ask next, as an ordinary sentence.
+
+    Grounded in this store: a named product and the platform it is most
+    likely to suit, not a set of generic marketing topics.
+    """
     picks = _preferred_platforms(store)
     label = PLATFORM_GUIDES[platform]["label"] if platform in PLATFORM_GUIDES else \
         PLATFORM_GUIDES[picks[0]]["label"]
-    out = [
-        f"How should I market my store this week?",
-        f"Which social media platform suits my business?",
-    ]
-    if has_products:
-        out.append(f"What should I post on {label} this week?")
-        out.append(f"How do I advertise my products on {label}?")
+    primary = (products or [None])[0]
+    out: list[str] = []
+    if has_products and primary:
+        out.append("Which of my products should I promote first?")
+        out.append(f"Write a caption for {primary['name']} on {label}")
     else:
         out.append("How do I get my first product ready to promote?")
-    return out
+    out.append("How do I get more people to discover my store?")
+    out.append("Help me plan an ad with a budget I choose")
+    return out[:4]
 
 
 def _video_label(platform: str, kind: str) -> str:
@@ -1283,10 +1588,25 @@ class MarketingSidekickService:
         self.db = db
 
     async def chat(self, store_id: str, requester_id: str, data: dict) -> dict:
+        """The original one-shot entry point, now answered by Zeno.
+
+        Kept so an app build that predates the Zeno conversation still gets a
+        grounded answer; there is one prompt and one set of checks behind both.
+        """
+        return await self.zeno_turn(store_id, requester_id, data)
+
+    async def zeno_turn(self, store_id: str, requester_id: str, data: dict) -> dict:
+        """One turn of Zeno's marketing conversation.
+
+        The store is loaded through `get_owned`, so another seller's id is a
+        403 before any data is read. The products are the store's live
+        listings, and the history is the transcript the app is holding - the
+        model never supplies either to itself.
+        """
         store = await _owned_store(self.db, store_id, requester_id)
         message = marketing._clean(data.get("message"), MAX_MESSAGE)
         if not message:
-            raise HTTPException(status_code=400, detail="Type a question for the Sidekick.")
+            raise HTTPException(status_code=400, detail="Ask Zeno a question about your store.")
         platform = data.get("platform")
         if platform and platform not in PLATFORM_GUIDES:
             raise HTTPException(
@@ -1308,17 +1628,29 @@ class MarketingSidekickService:
             if role in ("user", "assistant") and text:
                 history.append({"role": role, "text": text})
 
+        # The seller rarely fills in a platform field; they say "on TikTok".
+        # The playbook follows the conversation: the current message first,
+        # then the most recent turn that named one.
+        if platform is None:
+            platform = _platform_in(message)
+            if platform is None:
+                for turn in reversed(history):
+                    platform = _platform_in(turn["text"])
+                    if platform:
+                        break
         product_ids = [p for p in (data.get("product_ids") or []) if isinstance(p, str)]
-        products = await _selected_products(self.db, store, product_ids[:MAX_PRODUCTS])
+        products = await _selected_products(
+            self.db, store, product_ids[:MAX_PRODUCTS], limit=CONTEXT_PRODUCTS)
         campaigns = await _campaign_activity(self.db, store)
+        total_active = await _active_listing_count(self.db, store)
 
         provider = marketing._provider_available()
         reply = ""
         used = "template"
         fallback_reason: Optional[str] = None
         if provider:
-            prompt = _chat_prompt(store, products, campaigns, platform, history, message,
-                                  language)
+            prompt = _zeno_prompt(store, products, campaigns, platform, history, message,
+                                  language, total_active)
             try:
                 used, candidate = await _ask_model(prompt, reply_tokens=700)
                 unsupported = _unsupported_claim(candidate, store, products)
@@ -1351,20 +1683,26 @@ class MarketingSidekickService:
             reply = _fallback_reply(store, products, platform, objective, fallback_reason)
         return {
             "reply": reply,
+            "source": "model" if used != "template" else "guidance",
             "provider": used,
             "available": used != "template",
             "fallback_reason": fallback_reason,
+            # The app renders these instead of one wall of text. A model that
+            # ignored the format still produces one prose block here.
+            "sections": _sections(reply),
             "platform": platform,
             "language": language,
             "store": {"id": store.id, "name": store.name},
             "products": [
                 {"id": p["id"], "name": p["name"], "price": p.get("price"),
-                 "price_label": _price(p), "image": p.get("image")}
+                 "price_label": _price(p), "image": p.get("image"),
+                 "category": p.get("category"),
+                 "available_units": p.get("available_units")}
                 for p in products[:3]
             ],
             "activity": campaigns,
             "actions": _actions(store, products, platform, objective),
-            "suggestions": _suggestions(platform, bool(products), store),
+            "suggestions": _suggestions(platform, bool(products), store, products),
         }
 
     async def platform_guide(self, store_id: str, requester_id: str,
