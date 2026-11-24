@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.core import admin_reports, intelligence, market_intel, market_models
+from api.core import admin_reports, intelligence
 from api.core.audit import record_audit
 from api.core.client_ip import client_ip_or_none
 from api.core.config import settings
@@ -126,79 +126,6 @@ async def intelligence_sellers(
     db: AsyncSession = Depends(get_db),
 ):
     return await intelligence.sellers_overview(db, limit=limit)
-
-
-# ── Listing and marketplace intelligence ─────────────────────────────────────
-# Figures live in api/core/market_intel.py (rankings, listing detail,
-# performance) and api/core/market_models.py (anomalies, forecasts, models).
-# All reads; the scan only writes deduplicated admin alerts and an audit row.
-
-@router.get("/intelligence/market/rankings")
-async def market_rankings(
-    window_days: int = Query(7, ge=1, le=90),
-    limit: int = Query(10, ge=1, le=50),
-    category: Optional[str] = Query(None, max_length=100),
-    admin: User = Depends(require_permission(Permission.ADMIN_SUMMARY)),
-    db: AsyncSession = Depends(get_db),
-):
-    return await market_intel.rankings(db, window_days=window_days, limit=limit, category=category)
-
-
-@router.get("/intelligence/market/listings/{listing_id}")
-async def market_listing_detail(
-    listing_id: str,
-    window_days: int = Query(30, ge=1, le=90),
-    admin: User = Depends(require_permission(Permission.ADMIN_SUMMARY)),
-    db: AsyncSession = Depends(get_db),
-):
-    detail = await market_intel.listing_detail(db, listing_id, window_days=window_days)
-    if detail is None:
-        raise HTTPException(status_code=404, detail="Listing not found")
-    return detail
-
-
-@router.get("/intelligence/market/performance")
-async def market_performance(
-    window_days: int = Query(30, ge=1, le=90),
-    limit: int = Query(10, ge=1, le=50),
-    admin: User = Depends(require_permission(Permission.ADMIN_SUMMARY)),
-    db: AsyncSession = Depends(get_db),
-):
-    return await market_intel.performance(db, window_days=window_days, limit=limit)
-
-
-@router.get("/intelligence/market/anomalies")
-async def market_anomalies(
-    weeks: int = Query(6, ge=4, le=12),
-    admin: User = Depends(require_permission(Permission.ADMIN_SUMMARY)),
-    db: AsyncSession = Depends(get_db),
-):
-    return await market_models.detect(db, weeks=weeks)
-
-
-@router.post("/intelligence/market/anomalies/scan")
-async def market_anomalies_scan(
-    request: Request,
-    admin: User = Depends(require_permission(Permission.ADMIN_SUMMARY)),
-    db: AsyncSession = Depends(get_db),
-):
-    """Raise one deduplicated alert per anomaly. Never changes an account."""
-    outcome = await market_models.scan_and_alert(db)
-    await record_audit(
-        db, admin.id, "market_anomaly_scan", "analytics", "anomalies",
-        detail=json.dumps(outcome, separators=(",", ":")),
-        ip_address=client_ip_or_none(request),
-    )
-    await db.commit()
-    return outcome
-
-
-@router.get("/intelligence/market/models")
-async def market_models_report(
-    admin: User = Depends(require_permission(Permission.ADMIN_SUMMARY)),
-    db: AsyncSession = Depends(get_db),
-):
-    return await market_models.models(db)
 
 
 # ── Reports ───────────────────────────────────────────────────────────────────
