@@ -35,6 +35,7 @@ from api.security import (
     password_fingerprint,
 )
 from api.core import activity
+from api.core.account_status import ensure_not_suspended
 from api.core.events import publish, UserRegistered, UserLoggedIn
 from api.core.config import settings
 from api.core.geo import haversine_km, round_distance_km
@@ -246,6 +247,7 @@ class AuthService:
             await self._consume_phone_otp(phone, code, OtpPurpose.registration)
             return {"ok": True, "account_exists": False,
                     "phone_verify_token": create_phone_verify_token(phone)}
+        ensure_not_suspended(user.account_status, user.suspended_until)
         await self._consume_phone_otp(phone, code, OtpPurpose.sign_in)
         # The code just proved the number, for an account that may have
         # skipped verifying it at signup.
@@ -344,6 +346,7 @@ class AuthService:
                 status_code=400,
                 detail="This reset was already used. Request a new code if you need to.",
             )
+        ensure_not_suspended(user.account_status, user.suspended_until)
         _check_new_password(new_password)
         user.password_hash = await hash_password_async(new_password)
         # The SMS code just proved the number, for an account that may have
@@ -708,6 +711,7 @@ class AuthService:
                 detail="Invalid phone number or password",
             )
 
+        ensure_not_suspended(user.account_status, user.suspended_until)
         user.last_seen = datetime.utcnow()
         session_id = await activity.open_session(self.db, user.id)
         await self.db.commit()

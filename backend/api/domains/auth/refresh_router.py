@@ -21,7 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
 from api.core import activity as activity_sessions
-from api.database import get_db, RefreshToken
+from api.core.account_status import ensure_not_suspended
+from api.database import User, get_db, RefreshToken
 from api.security import (
     create_access_token,
     create_refresh_token,
@@ -125,6 +126,14 @@ async def refresh_access_token(body: RefreshRequest, db: AsyncSession = Depends(
 
     if stored.revoked_at is not None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token has been revoked")
+
+    # A suspended account keeps no session: refreshing it is refused, and the
+    # tokens stay revoked (the suspension revoked them when it was applied).
+    account = (await db.execute(
+        select(User.account_status, User.suspended_until).where(User.id == user_id)
+    )).first()
+    if account is not None:
+        ensure_not_suspended(account[0], account[1])
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     if _naive_utc(stored.expires_at) < now:

@@ -641,6 +641,15 @@ async def _activity_loop(interval_seconds: int = 60) -> None:
                     raise
                 except Exception as exc:
                     logger.error("[activity] session sweep failed type=%s", type(exc).__name__)
+                # Enforcement never depends on this (a suspension reads as ended
+                # from its own time); the sweep writes the expiry to the history.
+                try:
+                    from api.core import account_status
+                    await account_status.expire_due_suspensions()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error("[activity] suspension expiry sweep failed type=%s", type(exc).__name__)
         await asyncio.sleep(interval_seconds)
 
 

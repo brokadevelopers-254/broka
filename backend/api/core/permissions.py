@@ -46,6 +46,10 @@ class Permission(str, enum.Enum):
     # Admin
     ADMIN_SUMMARY         = "can_admin_summary"
     MANAGE_USERS          = "can_manage_users"
+    # Restricting, suspending and reinstating accounts (api/domains/admin/
+    # moderation.py). Separate from MANAGE_USERS so it can be narrowed later
+    # without touching flagging or the directory.
+    MANAGE_ACCOUNT_STATUS = "can_manage_account_status"
     VERIFY_USER           = "can_verify_user"
     PROMOTE_ADMIN         = "can_promote_admin"
     VIEW_TRANSACTIONS     = "can_view_transactions"
@@ -106,6 +110,7 @@ _ADMIN_PERMISSIONS: set[Permission] = _USER_PERMISSIONS | {
     Permission.VIEW_ALL_DISPUTES,
     Permission.ADMIN_SUMMARY,
     Permission.MANAGE_USERS,
+    Permission.MANAGE_ACCOUNT_STATUS,
     Permission.VERIFY_USER,
     Permission.PROMOTE_ADMIN,
     Permission.VIEW_TRANSACTIONS,
@@ -138,6 +143,10 @@ def get_user_permissions(user: User) -> set[Permission]:
     # Suspended users lose transactional permissions
     trust_score = getattr(user, "trust_score", 100)
     if trust_score is not None and trust_score < 20:
+        perms -= _SUSPENDED_BLOCKED
+    # A restricted account may still sign in and use the app, but not transact
+    # (see api/core/account_status.py). A suspended one never reaches this point.
+    if getattr(user, "account_status", "active") == "restricted":
         perms -= _SUSPENDED_BLOCKED
 
     return perms

@@ -218,6 +218,12 @@ app.add_middleware(JsonCompressionMiddleware)
 # other middleware or route reads it. See api/core/body_limit.py.
 app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_mb * 1024 * 1024)
 
+# Refuses every request that carries a suspended account's access token, HTTP
+# and WebSocket alike (api/core/account_status.py). Added after the size limit,
+# so it runs before it: a suspended account is refused before anything else.
+from api.core.account_status import AccountStatusMiddleware
+app.add_middleware(AccountStatusMiddleware)
+
 
 # ── Validation errors ─────────────────────────────────────────────────────────
 
@@ -360,6 +366,9 @@ app.include_router(admin_intelligence_router, prefix="/admin", tags=["Admin - In
 # Signed-in sessions, live presence and engagement (api/core/activity.py).
 from api.domains.admin.activity import router as admin_activity_router
 app.include_router(admin_activity_router, prefix="/admin", tags=["Admin - Activity"])
+# Restriction, suspension and reinstatement (api/domains/admin/moderation.py).
+from api.domains.admin.moderation import router as admin_moderation_router
+app.include_router(admin_moderation_router, prefix="/admin", tags=["Admin - Moderation"])
 # Production cost tracking. Mounted at /admin/revenue/costs, a more specific
 # prefix than /admin/revenue, whose handler lives in alerts_revenue.py above.
 app.include_router(
