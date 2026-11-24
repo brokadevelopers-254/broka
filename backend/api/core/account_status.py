@@ -17,7 +17,8 @@ suspended_until and never expires.
 Enforcement reads the user row through a cache of CACHE_TTL_SECONDS in each
 process. The process that applies a change forgets its entry at once; other
 processes pick the change up within that window. If the status cannot be read,
-an authenticated request is refused with 503 rather than allowed through.
+an authenticated request is not allowed through: a database outage gets the
+app's DB_UNAVAILABLE 503, and any other error the app's 500.
 """
 from __future__ import annotations
 
@@ -39,7 +40,6 @@ logger = logging.getLogger(__name__)
 CACHE_TTL_SECONDS = 10.0
 _CACHE_MAX_ENTRIES = 50_000
 SUSPENDED_DETAIL = "This account is suspended. Contact BROKA support to find out more."
-UNVERIFIED_DETAIL = "Account status could not be verified. Try again shortly."
 
 # The durations an administrator can choose. None means permanent.
 SUSPENSION_DURATIONS: dict[str, Optional[timedelta]] = {
@@ -133,9 +133,24 @@ class AccountStatusMiddleware:
 
         try:
             value = await _status_of(claims["sub"])
-        except Exception as exc:  # the status is unknown: refuse rather than guess
-            logger.error("[account-status] could not read status type=%s", type(exc).__name__)
-            await _refuse(scope, receive, send, http_status.HTTP_503_SERVICE_UNAVAILABLE, UNVERIFIED_DETAIL)
+        except Exception as exc:
+            # The status is unknown, so the request is not let through. An
+            # outage gets the app's own 503 (DB_UNAVAILABLE, Retry-After: 2),
+            # which the app retries on: a bare 503 here made every signed-in
+            # request during a pool exhaustion look like a different failure.
+            # Any other error is re-raised, so the app's handler answers 500
+            # as it would have from inside the route.
+            from api.database import db_unavailable_json, db_unavailable_kind
+            if scope["type"] == "websocket":
+                if db_unavailable_kind(exc) is None:
+                    raise
+                # 1013: try again later. Closing before accept refuses the handshake.
+                await send({"type": "websocket.close", "code": 1013, "reason": "Service busy"})
+                return
+            response = db_unavailable_json(exc, method=scope.get("method", ""), path=scope.get("path", ""))
+            if response is None:
+                raise
+            await response(scope, receive, send)
             return
 
         if value is not None and is_suspended(value[0], value[1]):

@@ -474,6 +474,36 @@ def is_db_unavailable(exc: BaseException) -> bool:
     return db_unavailable_kind(exc) is not None
 
 
+def db_unavailable_json(exc: BaseException, *, method: str, path: str):
+    """The 503 the API gives when the database could not take a request, or
+    None when `exc` is an ordinary error (a constraint, a bug).
+
+    One definition for main.py's handlers and for the account status
+    middleware, which reads the database before any route runs: the app's
+    retry logic keys on DB_UNAVAILABLE and Retry-After, so an outage must
+    look the same whichever of them met it."""
+    kind = db_unavailable_kind(exc)
+    if kind is None:
+        return None
+    from starlette.responses import JSONResponse
+    from api.core.observability import request_id_var, safe_log_path
+    try:
+        status = pool_status()
+    except Exception:
+        status = {}
+    logging.getLogger("api.database").warning(
+        "[db] DB_UNAVAILABLE kind=%s method=%s path=%s checked_out=%s max=%s rid=%s err=%s",
+        kind, method, safe_log_path(path), status.get("checked_out", "-"),
+        status.get("max_connections", "-"), request_id_var.get("-"), type(exc).__name__,
+    )
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "The service is busy right now. Please try again in a moment.",
+                 "code": "DB_UNAVAILABLE"},
+        headers={"Retry-After": "2"},
+    )
+
+
 DATABASE_URL = _build_db_url()
 engine, _session_factory = _build_engine_and_factory(DATABASE_URL)
 Base = declarative_base()

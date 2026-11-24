@@ -259,26 +259,8 @@ def _db_unavailable_response(request: Request, exc: Exception):
     refusing new clients (EMAXCONNSESSION) - instead of a 500 with a
     traceback. Nothing is lost by it: a message is only reported sent once
     it is committed, and a call's state lives in Redis (api/core/call_state)."""
-    from api.database import db_unavailable_kind, pool_status
-    kind = db_unavailable_kind(exc)
-    if kind is None:
-        return None
-    from api.core.observability import request_id_var, safe_log_path
-    try:
-        status = pool_status()
-    except Exception:
-        status = {}
-    logging.getLogger("api.database").warning(
-        "[db] DB_UNAVAILABLE kind=%s method=%s path=%s checked_out=%s max=%s rid=%s err=%s",
-        kind, request.method, safe_log_path(request.url.path), status.get("checked_out", "-"),
-        status.get("max_connections", "-"), request_id_var.get("-"), type(exc).__name__,
-    )
-    return JSONResponse(
-        status_code=503,
-        content={"detail": "The service is busy right now. Please try again in a moment.",
-                 "code": "DB_UNAVAILABLE"},
-        headers={"Retry-After": "2"},
-    )
+    from api.database import db_unavailable_json
+    return db_unavailable_json(exc, method=request.method, path=request.url.path)
 
 
 from sqlalchemy.exc import DBAPIError as _DBAPIError, TimeoutError as _PoolTimeoutError  # noqa: E402
