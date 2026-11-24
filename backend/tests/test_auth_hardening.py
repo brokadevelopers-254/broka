@@ -83,7 +83,8 @@ def _non_access_tokens(user_id: str = "user-123") -> dict[str, str]:
 class TestOnlyAccessTokensAuthenticate:
     def test_access_token_resolves_to_its_user(self):
         tok = create_access_token({"sub": "user-123"})
-        assert get_current_user(tok) == {"id": "user-123"}
+        # A token without a session claim has no session; its heartbeats are presence only.
+        assert get_current_user(tok) == {"id": "user-123", "sid": None}
         assert decode_access_token(tok)["sub"] == "user-123"
 
     @pytest.mark.parametrize("kind", ["call", "refresh", "phone_verify", "email_verify", "password_reset"])

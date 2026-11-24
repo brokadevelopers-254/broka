@@ -128,6 +128,7 @@ async def test_timeseries_shape_and_bucketing(client):
     body = r.json()
     assert set(body["series"]) == {
         "signups",
+        "active_users",
         "listings_created",
         "deals_agreed",
         "gmv_minor",
@@ -137,7 +138,13 @@ async def test_timeseries_shape_and_bucketing(client):
     for key, points in body["series"].items():
         assert len(points) >= 3, key
         assert all(set(p) == {"t", "v"} for p in points)
-        assert all(isinstance(p["v"], int) for p in points)
+        if key == "active_users":
+            # No activity has been recorded in this database, so no bucket is
+            # covered: null, never a count of zero the system did not measure.
+            assert all(p["v"] is None for p in points)
+        else:
+            assert all(isinstance(p["v"], int) for p in points)
+    assert body["coverage"] == {"active_users_started_on": None}
     # Signups counted today include the admin just created.
     assert sum(p["v"] for p in body["series"]["signups"]) >= 1
 
