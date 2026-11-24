@@ -510,18 +510,36 @@ async def location_visibility(
     return {"ok": True}
 
 
+class HeartbeatIn(BaseModel):
+    # False when the app sends the beat from the background. It is
+    # acknowledged but does not count as activity. Clients that send no body
+    # are read as foreground, which is what they have always sent.
+    foreground: bool = True
+
+
 @router.patch("/heartbeat")
 async def heartbeat(
+    body: Optional[HeartbeatIn] = None,
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    from api.database import User
-    from sqlalchemy import select
-    from datetime import datetime
-    r = await db.execute(select(User).where(User.id == current_user["id"]))
-    user = r.scalar_one_or_none()
-    if user:
-        user.last_seen = datetime.utcnow()
+    """Presence and foreground activity. The rules are in api/core/activity.py."""
+    from sqlalchemy.exc import IntegrityError
+    from api.core import activity
+
+    foreground = body.foreground if body is not None else True
+    try:
+        await activity.record_heartbeat(
+            db, current_user["id"], current_user.get("sid"), foreground=foreground,
+        )
+        await db.commit()
+    except IntegrityError:
+        # Two devices of one account beat for the day's first time together.
+        # The loser retries from the top, and the retry finds the day's row.
+        await db.rollback()
+        await activity.record_heartbeat(
+            db, current_user["id"], current_user.get("sid"), foreground=foreground,
+        )
         await db.commit()
     return {"ok": True}
 

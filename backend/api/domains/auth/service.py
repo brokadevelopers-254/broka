@@ -34,6 +34,7 @@ from api.security import (
     decode_email_verify_token, create_password_reset_token, decode_password_reset_token,
     password_fingerprint,
 )
+from api.core import activity
 from api.core.events import publish, UserRegistered, UserLoggedIn
 from api.core.config import settings
 from api.core.geo import haversine_km, round_distance_km
@@ -250,9 +251,10 @@ class AuthService:
         # skipped verifying it at signup.
         user.phone_verified = True
         user.last_seen = datetime.utcnow()
+        session_id = await activity.open_session(self.db, user.id)
         await self.db.commit()
-        token = create_access_token({"sub": user.id})
-        refresh_token = await self._issue_refresh_token(user.id)
+        token = create_access_token({"sub": user.id, "sid": session_id})
+        refresh_token = await self._issue_refresh_token(user.id, session_id)
         await publish(UserLoggedIn(user_id=user.id))
         return {
             "ok": True,
@@ -374,9 +376,10 @@ class AuthService:
         otherwise outlive it by a month - then signs this one in again."""
         from api.domains.auth.refresh_router import revoke_all_refresh_tokens
         await revoke_all_refresh_tokens(self.db, user.id)
+        session_id = await activity.open_session(self.db, user.id)
         await self.db.commit()
-        token = create_access_token({"sub": user.id})
-        refresh_token = await self._issue_refresh_token(user.id)
+        token = create_access_token({"sub": user.id, "sid": session_id})
+        refresh_token = await self._issue_refresh_token(user.id, session_id)
         return {
             "ok": True,
             "access_token": token,
@@ -673,8 +676,10 @@ class AuthService:
                 detail="This phone number or email is already registered",
             ) from exc
 
-        token = create_access_token({"sub": user.id})
-        refresh_token = await self._issue_refresh_token(user.id)
+        session_id = await activity.open_session(self.db, user.id)
+        await self.db.commit()
+        token = create_access_token({"sub": user.id, "sid": session_id})
+        refresh_token = await self._issue_refresh_token(user.id, session_id)
         await publish(UserRegistered(user_id=user.id, email=user.email or "", name=user.name))
         return {
             "access_token": token,
@@ -704,10 +709,11 @@ class AuthService:
             )
 
         user.last_seen = datetime.utcnow()
+        session_id = await activity.open_session(self.db, user.id)
         await self.db.commit()
 
-        token = create_access_token({"sub": user.id})
-        refresh_token = await self._issue_refresh_token(user.id)
+        token = create_access_token({"sub": user.id, "sid": session_id})
+        refresh_token = await self._issue_refresh_token(user.id, session_id)
         await publish(UserLoggedIn(user_id=user.id))
         return {
             "access_token": token,
@@ -723,7 +729,7 @@ class AuthService:
             "lng": user.lng,
         }
 
-    async def _issue_refresh_token(self, user_id: str) -> str:
+    async def _issue_refresh_token(self, user_id: str, session_id: Optional[str] = None) -> str:
         """FIX (2026-08-13, reported as 'calls silently stopped notifying the
         callee'): register()/login() previously only ever issued a 15-minute
         access token (ACCESS_TOKEN_EXPIRE_MINUTES) and never a refresh token -
@@ -739,7 +745,7 @@ class AuthService:
         path) - this alone does not fix the reported symptom without those.
         """
         from api.domains.auth.refresh_router import issue_refresh_token_row
-        rt_token = issue_refresh_token_row(self.db, user_id)
+        rt_token = issue_refresh_token_row(self.db, user_id, session_id)
         await self.db.commit()
         return rt_token
 

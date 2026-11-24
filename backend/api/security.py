@@ -467,7 +467,10 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     user_id: str | None = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Bad token payload")
-    return {"id": user_id}
+    # `sid` is the signed-in session this token was issued for. Tokens from
+    # before sessions existed have none, and heartbeats from them count only
+    # as account presence.
+    return {"id": user_id, "sid": payload.get("sid")}
 
 
 # v6.1: browse-before-signup — auto_error=False means a missing/absent

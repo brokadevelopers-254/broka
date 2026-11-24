@@ -1652,6 +1652,11 @@ class RefreshToken(Base):
     # may still get an access token, but must never mint another refresh
     # token: replaying one stolen token must not create an unbounded family.
     rotated_at  = Column(DateTime, nullable=True)
+    # The signed-in session this token belongs to (api/core/activity.py). It
+    # carries over when the token is rotated, so one session keeps one id for
+    # its whole life. NULL only for tokens issued before sessions existed,
+    # which get a session the first time they are exchanged.
+    session_id = Column(String, nullable=True, index=True)
     created_at  = Column(DateTime, default=datetime.utcnow)
 
 
@@ -1925,7 +1930,7 @@ async def _apply_optional_statements(conn, statements) -> None:
         await conn.execute(text(prepared))
 
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 SCHEMA_REVISIONS = (
     (1, "legacy_schema_adoption"),
     (2, "durable_payment_intents_and_callbacks"),
@@ -1991,6 +1996,12 @@ SCHEMA_REVISIONS = (
     # replica serving checkout against a database without them would fail
     # every order, so it waits for the release step instead.
     (19, "store_orders"),
+    # Signed-in sessions and foreground activity (api/models/user_activity.py):
+    # user_sessions, user_activity_days and activity_samples come from
+    # create_all(); refresh_tokens.session_id is the ALTER above. Without the
+    # revision a replica would issue tokens and heartbeats against a database
+    # that cannot record them.
+    (20, "user_activity_sessions"),
 )
 
 # Tables/columns that must exist before an API process is safe to serve
@@ -2007,7 +2018,7 @@ CRITICAL_SCHEMA = {
     },
     "deals": {"id", "status", "buyer_id", "seller_id"},
     "ledger_entries": {"id", "deal_id", "account", "direction", "amount_kes"},
-    "refresh_tokens": {"id", "jti", "expires_at", "rotated_at"},
+    "refresh_tokens": {"id", "jti", "expires_at", "rotated_at", "session_id"},
     "verification_payments": {
         "id", "user_id", "amount", "status", "client_ref",
         "request_fingerprint", "active_intent", "last_error",
@@ -2021,6 +2032,8 @@ CRITICAL_SCHEMA = {
 # while the guard that makes it useful was never created (for example an
 # index that failed during adoption), so readiness checks both.
 CRITICAL_INDEXES = {
+    # Sessions: a refresh looks its session up by this column on every exchange.
+    "refresh_tokens": {"ix_refresh_tokens_session_id"},
     "mpesa_transactions": {
         "uq_mpesa_transactions_active_intent",
         "uq_mpesa_transactions_deal_client_ref",
@@ -2252,6 +2265,7 @@ async def _init_db_impl():
         ("api.models.legal", ("LegalAcceptance",)),
         ("api.models.feedback", ("UserFeedback",)),
         ("api.models.admin_report", ("AdminReport",)),
+        ("api.models.user_activity", ("UserSession", "UserActivityDay", "ActivitySample")),
         ("api.models.escrow_provider", ("EscrowProviderRow", "EscrowProviderRevision")),
         ("api.models.store_order", (
             "StoreOrder", "StoreOrderItem", "StoreOrderEvent", "StoreOrderPayment",
@@ -2595,6 +2609,10 @@ async def _init_db_impl():
             # the ALTER, and the helper skips it when it is already nullable.
             "ALTER TABLE mpesa_transactions ALTER COLUMN checkout_request_id DROP NOT NULL",
             "ALTER TABLE refresh_tokens ADD COLUMN rotated_at DATETIME",
+            # Sessions (api/core/activity.py, schema revision 20). The
+            # column is added here; the table is created by create_all.
+            "ALTER TABLE refresh_tokens ADD COLUMN session_id VARCHAR(64)",
+            "CREATE INDEX IF NOT EXISTS ix_refresh_tokens_session_id ON refresh_tokens (session_id)",
             "ALTER TABLE featured_payments ADD COLUMN last_error TEXT",
             "ALTER TABLE verification_payments ADD COLUMN client_ref VARCHAR(200)",
             "ALTER TABLE verification_payments ADD COLUMN request_fingerprint VARCHAR(64)",

@@ -500,6 +500,21 @@ class Settings:
     #   Anything else refuses to start (validate_startup).
     native_mode: str = field(default_factory=lambda: os.getenv("BROKA_NATIVE", "auto").strip().lower() or "auto")
 
+    # ── Activity retention (api/core/activity.py) ────────────────────────────
+    # Session rows hold when a device was signed in, how long it was in the
+    # foreground, and why it ended. They hold no contact details, device
+    # identifiers or IP addresses. The sweep deletes each table's rows once
+    # they are older than these many days.
+    activity_session_retention_days: int = field(default_factory=lambda: max(
+        1, int(os.getenv("ACTIVITY_SESSION_RETENTION_DAYS", "180") or 180)
+    ))
+    activity_day_retention_days: int = field(default_factory=lambda: max(
+        1, int(os.getenv("ACTIVITY_DAY_RETENTION_DAYS", "400") or 400)
+    ))
+    activity_sample_retention_days: int = field(default_factory=lambda: max(
+        1, int(os.getenv("ACTIVITY_SAMPLE_RETENTION_DAYS", "45") or 45)
+    ))
+
     # ── Redis (for rate-limiting, pub/sub, and distributed workers) ───────────
     redis_url: str = field(default_factory=lambda: os.getenv("REDIS_URL", ""))
 
