@@ -191,6 +191,15 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+# ── Account status ────────────────────────────────────────────────────────────
+# Refuses every request that carries a suspended account's access token, HTTP
+# and WebSocket alike (api/core/account_status.py). Added first, so it is the
+# innermost middleware: its refusals carry the request id and CORS headers, and
+# are logged and counted like any other answer. A browser would otherwise see a
+# CORS failure instead of the 403.
+from api.core.account_status import AccountStatusMiddleware  # noqa: E402
+app.add_middleware(AccountStatusMiddleware)
+
 # ── Observability (Sentry + request IDs + latency logging + Prometheus) ───────
 init_observability(app)
 
@@ -253,26 +262,8 @@ def _db_unavailable_response(request: Request, exc: Exception):
     refusing new clients (EMAXCONNSESSION) - instead of a 500 with a
     traceback. Nothing is lost by it: a message is only reported sent once
     it is committed, and a call's state lives in Redis (api/core/call_state)."""
-    from api.database import db_unavailable_kind, pool_status
-    kind = db_unavailable_kind(exc)
-    if kind is None:
-        return None
-    from api.core.observability import request_id_var, safe_log_path
-    try:
-        status = pool_status()
-    except Exception:
-        status = {}
-    logging.getLogger("api.database").warning(
-        "[db] DB_UNAVAILABLE kind=%s method=%s path=%s checked_out=%s max=%s rid=%s err=%s",
-        kind, request.method, safe_log_path(request.url.path), status.get("checked_out", "-"),
-        status.get("max_connections", "-"), request_id_var.get("-"), type(exc).__name__,
-    )
-    return JSONResponse(
-        status_code=503,
-        content={"detail": "The service is busy right now. Please try again in a moment.",
-                 "code": "DB_UNAVAILABLE"},
-        headers={"Retry-After": "2"},
-    )
+    from api.database import db_unavailable_json
+    return db_unavailable_json(exc, method=request.method, path=request.url.path)
 
 
 from sqlalchemy.exc import DBAPIError as _DBAPIError, TimeoutError as _PoolTimeoutError  # noqa: E402
@@ -357,6 +348,15 @@ app.include_router(admin_additions_router, prefix="/admin", tags=["Admin v3"])
 # insights) and the daily/weekly/monthly report archive.
 from api.domains.admin.intelligence import router as admin_intelligence_router
 app.include_router(admin_intelligence_router, prefix="/admin", tags=["Admin - Intelligence"])
+# Signed-in sessions, live presence and engagement (api/core/activity.py).
+from api.domains.admin.activity import router as admin_activity_router
+app.include_router(admin_activity_router, prefix="/admin", tags=["Admin - Activity"])
+# Restriction, suspension and reinstatement (api/domains/admin/moderation.py).
+from api.domains.admin.moderation import router as admin_moderation_router
+app.include_router(admin_moderation_router, prefix="/admin", tags=["Admin - Moderation"])
+# The Command Center's grouped figures and decisions (api/core/command_center.py).
+from api.domains.admin.command_center import router as admin_command_center_router
+app.include_router(admin_command_center_router, prefix="/admin", tags=["Admin - Command Center"])
 # Production cost tracking. Mounted at /admin/revenue/costs, a more specific
 # prefix than /admin/revenue, whose handler lives in alerts_revenue.py above.
 app.include_router(

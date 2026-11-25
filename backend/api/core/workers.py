@@ -114,6 +114,8 @@ _service_communications_task: asyncio.Task | None = None
 _service_communications_running = False
 _message_delivery_task: asyncio.Task | None = None
 _message_delivery_running = False
+_activity_task: asyncio.Task | None = None
+_activity_running = False
 
 # Chat message pushes that failed (FCM unavailable, a phone offline) or never
 # went (a restart during the debounce) are retried from the delivery rows
@@ -619,8 +621,41 @@ async def task_expire_buy_agent_watches(ctx: dict | None = None) -> None:
     await service.expire_old_watches()
 
 
+async def _activity_loop(interval_seconds: int = 60) -> None:
+    """Close silent sessions, sample presence and prune old activity rows.
+
+    One replica at a time (the lease). The sweep is idempotent, so a missed
+    or repeated pass only moves when a session is closed by a few seconds.
+    See api/core/activity.py for the definitions it applies.
+    """
+    global _activity_running
+    _activity_running = True
+    logger.info("[activity] session sweep started (every %ds)", interval_seconds)
+    while _activity_running:
+        async with scheduler_lease("broka:scheduler:activity") as acquired:
+            if acquired:
+                try:
+                    from api.core import activity
+                    await activity.run_sweep()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error("[activity] session sweep failed type=%s", type(exc).__name__)
+                # Enforcement never depends on this (a suspension reads as ended
+                # from its own time); the sweep writes the expiry to the history.
+                try:
+                    from api.core import account_status
+                    await account_status.expire_due_suspensions()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error("[activity] suspension expiry sweep failed type=%s", type(exc).__name__)
+        await asyncio.sleep(interval_seconds)
+
+
 async def start_periodic_sweep(interval_seconds: int = 300) -> None:
     global _sweep_task, _nudge_task, _service_communications_task, _message_delivery_task
+    global _activity_task
     _sweep_task = asyncio.create_task(_periodic_sweep_loop(interval_seconds))
     # Separate task, not another entry in the 300s loop - see NUDGE_SWEEP_SECONDS.
     _nudge_task = asyncio.create_task(_nudge_loop())
@@ -633,6 +668,8 @@ async def start_periodic_sweep(interval_seconds: int = 300) -> None:
     )
     # Chat message push retries - see MESSAGE_DELIVERY_SWEEP_SECONDS.
     _message_delivery_task = asyncio.create_task(_message_delivery_loop())
+    # Signed-in sessions and presence (api/core/activity.py).
+    _activity_task = asyncio.create_task(_activity_loop())
     logger.info("[sweep] periodic deal-timer sweep started (every %ds)", interval_seconds)
 
 
@@ -640,11 +677,14 @@ async def stop_periodic_sweep() -> None:
     global _sweep_running, _sweep_task, _nudge_running, _nudge_task
     global _service_communications_running, _service_communications_task
     global _message_delivery_running, _message_delivery_task
+    global _activity_running, _activity_task
     _sweep_running = False
     _nudge_running = False
     _service_communications_running = False
     _message_delivery_running = False
-    for task in (_sweep_task, _nudge_task, _service_communications_task, _message_delivery_task):
+    _activity_running = False
+    for task in (_sweep_task, _nudge_task, _service_communications_task, _message_delivery_task,
+                 _activity_task):
         if task:
             task.cancel()
             try:

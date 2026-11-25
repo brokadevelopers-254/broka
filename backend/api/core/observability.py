@@ -13,6 +13,7 @@ Activation in main.py lifespan:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -162,12 +163,23 @@ class LatencyLogMiddleware:
                 status[0] = message.get("status", 200)
             await send(message)
 
+        from api.core import request_metrics
+
         db, db_token = self._start_db_stats()
         try:
             await self.app(scope, receive, capture_status)
+        except asyncio.CancelledError:
+            # The client went away: not an answer, so not counted.
+            raise
+        except BaseException:
+            # The app's generic 500 handler runs outside this middleware, so
+            # a request that raised is counted here or not at all.
+            request_metrics.record(500, (time.perf_counter() - start) * 1000)
+            raise
         finally:
             self._end_db_stats(db_token)
         elapsed_ms = (time.perf_counter() - start) * 1000
+        request_metrics.record(status[0], elapsed_ms)
 
         method = scope.get("method", "?")
         path   = safe_log_path(scope.get("path", "/"))

@@ -474,6 +474,36 @@ def is_db_unavailable(exc: BaseException) -> bool:
     return db_unavailable_kind(exc) is not None
 
 
+def db_unavailable_json(exc: BaseException, *, method: str, path: str):
+    """The 503 the API gives when the database could not take a request, or
+    None when `exc` is an ordinary error (a constraint, a bug).
+
+    One definition for main.py's handlers and for the account status
+    middleware, which reads the database before any route runs: the app's
+    retry logic keys on DB_UNAVAILABLE and Retry-After, so an outage must
+    look the same whichever of them met it."""
+    kind = db_unavailable_kind(exc)
+    if kind is None:
+        return None
+    from starlette.responses import JSONResponse
+    from api.core.observability import request_id_var, safe_log_path
+    try:
+        status = pool_status()
+    except Exception:
+        status = {}
+    logging.getLogger("api.database").warning(
+        "[db] DB_UNAVAILABLE kind=%s method=%s path=%s checked_out=%s max=%s rid=%s err=%s",
+        kind, method, safe_log_path(path), status.get("checked_out", "-"),
+        status.get("max_connections", "-"), request_id_var.get("-"), type(exc).__name__,
+    )
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "The service is busy right now. Please try again in a moment.",
+                 "code": "DB_UNAVAILABLE"},
+        headers={"Retry-After": "2"},
+    )
+
+
 DATABASE_URL = _build_db_url()
 engine, _session_factory = _build_engine_and_factory(DATABASE_URL)
 Base = declarative_base()
@@ -646,6 +676,15 @@ class User(Base):
     trust_score        = Column(Integer, default=100, nullable=True)
     # NEW v3.0: flag set when fraud engine marks user high-risk
     is_flagged         = Column(Boolean, default=False, nullable=False)
+    # Account status (api/core/account_status.py): active | restricted | suspended.
+    # suspended_until NULL with status "suspended" means permanent. Every
+    # change increments status_version, so a write can say which state it saw.
+    account_status     = Column(String(24), default="active", nullable=False)
+    suspended_until    = Column(DateTime, nullable=True)
+    status_reason      = Column(String(500), nullable=True)
+    status_changed_at  = Column(DateTime, nullable=True)
+    status_changed_by  = Column(String(64), nullable=True)
+    status_version     = Column(Integer, default=0, nullable=False)
     created_at         = Column(DateTime, default=datetime.utcnow)
 
     # ── NEW v6.1: account type + seller business identity ────────────────────
@@ -1652,6 +1691,11 @@ class RefreshToken(Base):
     # may still get an access token, but must never mint another refresh
     # token: replaying one stolen token must not create an unbounded family.
     rotated_at  = Column(DateTime, nullable=True)
+    # The signed-in session this token belongs to (api/core/activity.py). It
+    # carries over when the token is rotated, so one session keeps one id for
+    # its whole life. NULL only for tokens issued before sessions existed,
+    # which get a session the first time they are exchanged.
+    session_id = Column(String, nullable=True, index=True)
     created_at  = Column(DateTime, default=datetime.utcnow)
 
 
@@ -1925,7 +1969,7 @@ async def _apply_optional_statements(conn, statements) -> None:
         await conn.execute(text(prepared))
 
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 21
 SCHEMA_REVISIONS = (
     (1, "legacy_schema_adoption"),
     (2, "durable_payment_intents_and_callbacks"),
@@ -1991,6 +2035,16 @@ SCHEMA_REVISIONS = (
     # replica serving checkout against a database without them would fail
     # every order, so it waits for the release step instead.
     (19, "store_orders"),
+    # Signed-in sessions and foreground activity (api/models/user_activity.py):
+    # user_sessions, user_activity_days and activity_samples come from
+    # create_all(); refresh_tokens.session_id is the ALTER above. Without the
+    # revision a replica would issue tokens and heartbeats against a database
+    # that cannot record them.
+    (20, "user_activity_sessions"),
+    # Account restriction and suspension (api/core/account_status.py). The
+    # users columns are ALTERs above; account_moderation_events is create_all.
+    # Without the revision a replica would enforce suspensions it cannot read.
+    (21, "account_moderation"),
 )
 
 # Tables/columns that must exist before an API process is safe to serve
@@ -1998,6 +2052,9 @@ SCHEMA_REVISIONS = (
 # model dump: readiness must fail for a missing payment invariant, while a
 # missing optional feature table should not take the whole API down.
 CRITICAL_SCHEMA = {
+    # Enforcement reads these on every bearer request: without them a
+    # suspension could not be read, so the replica must not serve.
+    "users": {"id", "account_status", "suspended_until", "status_version"},
     "mpesa_transactions": {
         "id", "deal_id", "amount", "status", "callback_processed",
         "client_ref", "request_fingerprint", "active_intent", "last_error",
@@ -2007,7 +2064,7 @@ CRITICAL_SCHEMA = {
     },
     "deals": {"id", "status", "buyer_id", "seller_id"},
     "ledger_entries": {"id", "deal_id", "account", "direction", "amount_kes"},
-    "refresh_tokens": {"id", "jti", "expires_at", "rotated_at"},
+    "refresh_tokens": {"id", "jti", "expires_at", "rotated_at", "session_id"},
     "verification_payments": {
         "id", "user_id", "amount", "status", "client_ref",
         "request_fingerprint", "active_intent", "last_error",
@@ -2021,6 +2078,8 @@ CRITICAL_SCHEMA = {
 # while the guard that makes it useful was never created (for example an
 # index that failed during adoption), so readiness checks both.
 CRITICAL_INDEXES = {
+    # Sessions: a refresh looks its session up by this column on every exchange.
+    "refresh_tokens": {"ix_refresh_tokens_session_id"},
     "mpesa_transactions": {
         "uq_mpesa_transactions_active_intent",
         "uq_mpesa_transactions_deal_client_ref",
@@ -2252,6 +2311,8 @@ async def _init_db_impl():
         ("api.models.legal", ("LegalAcceptance",)),
         ("api.models.feedback", ("UserFeedback",)),
         ("api.models.admin_report", ("AdminReport",)),
+        ("api.models.user_activity", ("UserSession", "UserActivityDay", "ActivitySample")),
+        ("api.models.account_moderation", ("AccountModerationEvent",)),
         ("api.models.escrow_provider", ("EscrowProviderRow", "EscrowProviderRevision")),
         ("api.models.store_order", (
             "StoreOrder", "StoreOrderItem", "StoreOrderEvent", "StoreOrderPayment",
@@ -2595,6 +2656,18 @@ async def _init_db_impl():
             # the ALTER, and the helper skips it when it is already nullable.
             "ALTER TABLE mpesa_transactions ALTER COLUMN checkout_request_id DROP NOT NULL",
             "ALTER TABLE refresh_tokens ADD COLUMN rotated_at DATETIME",
+            # Sessions (api/core/activity.py, schema revision 20). The
+            # column is added here; the table is created by create_all.
+            "ALTER TABLE refresh_tokens ADD COLUMN session_id VARCHAR(64)",
+            "CREATE INDEX IF NOT EXISTS ix_refresh_tokens_session_id ON refresh_tokens (session_id)",
+            # Account status (api/core/account_status.py, schema revision 21).
+            # Existing accounts start active; the NOT NULL default fills them in.
+            "ALTER TABLE users ADD COLUMN account_status VARCHAR(24) DEFAULT 'active' NOT NULL",
+            "ALTER TABLE users ADD COLUMN suspended_until DATETIME",
+            "ALTER TABLE users ADD COLUMN status_reason VARCHAR(500)",
+            "ALTER TABLE users ADD COLUMN status_changed_at DATETIME",
+            "ALTER TABLE users ADD COLUMN status_changed_by VARCHAR(64)",
+            "ALTER TABLE users ADD COLUMN status_version INTEGER DEFAULT 0 NOT NULL",
             "ALTER TABLE featured_payments ADD COLUMN last_error TEXT",
             "ALTER TABLE verification_payments ADD COLUMN client_ref VARCHAR(200)",
             "ALTER TABLE verification_payments ADD COLUMN request_fingerprint VARCHAR(64)",

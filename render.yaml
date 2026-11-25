@@ -133,6 +133,14 @@ services:
       - key: SERVICE_USAGE_RETENTION_DAYS
         value: "400"         # Raw events older than this roll into service_usage_daily
                              # and are deleted in the same transaction.
+      - key: ACTIVITY_SESSION_RETENTION_DAYS
+        value: "180"         # Signed-in session rows (api/core/activity.py): start, last
+                             # foreground heartbeat, foreground seconds, end reason. No
+                             # contact details, device ids or IP addresses.
+      - key: ACTIVITY_DAY_RETENTION_DAYS
+        value: "400"         # Per-account daily foreground time: DAU/WAU/MAU and retention.
+      - key: ACTIVITY_SAMPLE_RETENTION_DAYS
+        value: "45"          # One-minute active-account counts behind peak concurrency.
       - key: DATABASE_URL
         fromDatabase:
           name: broka-db

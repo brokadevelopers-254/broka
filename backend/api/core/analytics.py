@@ -116,12 +116,19 @@ async def timeseries_report(
     def _iso(value: datetime) -> str:
         return value.isoformat() + "Z"
 
+    # Distinct active accounts per bucket, from the activity records. A bucket
+    # from before tracking began is null, not zero: nothing recorded it.
+    from api.core.activity import active_users_series
+    active = await active_users_series(db, buckets, bucket)
+
     return {
         "from": _iso(start),
         "to": _iso(end),
         "bucket": bucket,
+        "coverage": {"active_users_started_on": active["coverage_started_on"]},
         "series": {
             "signups": _points(signups),
+            "active_users": active["points"],
             "listings_created": _points(listings),
             "deals_agreed": _points(agreed),
             "gmv_minor": _money_points(gmv),

@@ -20,7 +20,9 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
-from api.database import get_db, RefreshToken
+from api.core import activity as activity_sessions
+from api.core.account_status import ensure_not_suspended
+from api.database import User, get_db, RefreshToken
 from api.security import (
     create_access_token,
     create_refresh_token,
@@ -44,9 +46,11 @@ ROTATE_AFTER = timedelta(days=7)
 ROTATION_GRACE = timedelta(minutes=10)
 
 
-def issue_refresh_token_row(db: AsyncSession, user_id: str) -> str:
+def issue_refresh_token_row(
+    db: AsyncSession, user_id: str, session_id: Optional[str] = None,
+) -> str:
     """A new refresh token for `user_id`, its row added to `db` (the
-    caller commits).
+    caller commits). `session_id` ties it to the session it extends.
 
     expires_at is stored as naive UTC, like every DateTime column here.
     It used to be passed timezone-aware, which SQLite accepts and Postgres
@@ -55,14 +59,15 @@ def issue_refresh_token_row(db: AsyncSession, user_id: str) -> str:
     token, expiry, jti = create_refresh_token(user_id)
     db.add(RefreshToken(
         user_id=user_id, jti=jti, expires_at=expiry.astimezone(timezone.utc).replace(tzinfo=None),
+        session_id=session_id,
     ))
     return token
 
 
 async def revoke_all_refresh_tokens(db: AsyncSession, user_id: str) -> None:
-    """Revokes every live refresh token of `user_id` (the caller commits).
-    Access tokens already issued run out on their own within
-    ACCESS_TOKEN_EXPIRE_MINUTES."""
+    """Revokes every live refresh token of `user_id` and ends every open
+    session of the account (the caller commits). Access tokens already
+    issued run out on their own within ACCESS_TOKEN_EXPIRE_MINUTES."""
     await db.execute(
         update(RefreshToken)
         .where(
@@ -71,6 +76,7 @@ async def revoke_all_refresh_tokens(db: AsyncSession, user_id: str) -> None:
         )
         .values(revoked_at=datetime.utcnow())
     )
+    await activity_sessions.end_user_sessions(db, user_id, "revoked")
 
 
 def _naive_utc(value: Optional[datetime]) -> Optional[datetime]:
@@ -121,12 +127,28 @@ async def refresh_access_token(body: RefreshRequest, db: AsyncSession = Depends(
     if stored.revoked_at is not None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token has been revoked")
 
+    # A suspended account keeps no session: refreshing it is refused, and the
+    # tokens stay revoked (the suspension revoked them when it was applied).
+    account = (await db.execute(
+        select(User.account_status, User.suspended_until).where(User.id == user_id)
+    )).first()
+    if account is not None:
+        ensure_not_suspended(account[0], account[1])
+
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     if _naive_utc(stored.expires_at) < now:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired")
 
+    # A token issued before sessions existed has none. Open one now and keep
+    # it on the token, so the session survives rotation like any other.
+    session_id = stored.session_id
+    backfilled = session_id is None
+    if backfilled:
+        session_id = await activity_sessions.open_session(db, user_id, now=now)
+        stored.session_id = session_id
+
     response = {
-        "access_token":  create_access_token({"sub": user_id}),
+        "access_token":  create_access_token({"sub": user_id, "sid": session_id}),
         "token_type":    "bearer",
         "expires_in":    15 * 60,  # 15 minutes in seconds
     }
@@ -135,13 +157,17 @@ async def refresh_access_token(body: RefreshRequest, db: AsyncSession = Depends(
         # This is the old token's grace window. It remains useful only as a
         # recovery retry for a lost response; rotation already happened, so
         # it must not create a second replacement.
+        if backfilled:
+            await db.commit()
         return response
     if issued is None or now - issued >= ROTATE_AFTER:
-        response["refresh_token"] = issue_refresh_token_row(db, user_id)
+        response["refresh_token"] = issue_refresh_token_row(db, user_id, session_id)
         stored.rotated_at = now
         grace_until = now + ROTATION_GRACE
         if _naive_utc(stored.expires_at) > grace_until:
             stored.expires_at = grace_until
+        await db.commit()
+    elif backfilled:
         await db.commit()
     return response
 
@@ -156,11 +182,16 @@ async def revoke_token(body: RevokeRequest, db: AsyncSession = Depends(get_db)):
         return  # Invalid token — nothing to revoke, return 204 silently
 
     jti = payload.get("jti")
-    await db.execute(
-        update(RefreshToken)
-        .where(RefreshToken.jti == jti)
-        .values(revoked_at=datetime.utcnow())
-    )
+    stored = (await db.execute(
+        select(RefreshToken).where(RefreshToken.jti == jti)
+    )).scalar_one_or_none()
+    if stored is None:
+        return
+    stored.revoked_at = datetime.utcnow()
+    # Only the live token ends its session. A rotated token's session goes on
+    # with its replacement, so revoking the old one must not end it.
+    if stored.session_id and stored.rotated_at is None:
+        await activity_sessions.end_session(db, stored.session_id, "logout")
     await db.commit()
 
 
