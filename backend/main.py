@@ -361,6 +361,9 @@ app.include_router(admin_command_center_router, prefix="/admin", tags=["Admin - 
 # work over time (api/core/operations.py, sampled by api/core/ops_sampler.py).
 from api.domains.admin.operations import router as admin_operations_router
 app.include_router(admin_operations_router, prefix="/admin", tags=["Admin - Operations"])
+# The report builder: custom reports, their schedules and archive (api/core/report_builder.py).
+from api.domains.admin.report_builder import router as admin_report_builder_router
+app.include_router(admin_report_builder_router, prefix="/admin/report-builder", tags=["Admin - Report builder"])
 # Production cost tracking. Mounted at /admin/revenue/costs, a more specific
 # prefix than /admin/revenue, whose handler lives in alerts_revenue.py above.
 app.include_router(

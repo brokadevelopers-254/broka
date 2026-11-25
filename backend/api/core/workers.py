@@ -541,6 +541,14 @@ async def _periodic_sweep_pass() -> None:
     except Exception as exc:
         logger.error("[sweep] founder report generation failed: %s", exc)
         ops_metrics.task_failed("periodic", "founder_report_generation", exc)
+    try:
+        # Saved custom reports whose schedule is due, emailed to their
+        # administrators after each run's commit (api/core/report_builder.py).
+        from api.core.report_builder import run_due_schedules
+        await run_due_schedules()
+    except Exception as exc:
+        logger.error("[sweep] scheduled report builder runs failed: %s", exc)
+        ops_metrics.task_failed("periodic", "report_builder_schedules", exc)
 
 
 async def task_notify_expiry_alerts(ctx: dict | None = None) -> None:
