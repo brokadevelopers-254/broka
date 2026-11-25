@@ -59,7 +59,10 @@ def set_test_db(tmp_path_factory):
 
 
 @pytest_asyncio.fixture(scope="module", autouse=True)
-async def setup_db():
+async def setup_db(set_test_db):
+    # Depends on set_test_db. Autouse fixtures run in alphabetical order, and
+    # seeded() sorts before set_test_db, so without this the schema is built
+    # in the default database and the tests query an empty test database.
     await init_db()
 
 
