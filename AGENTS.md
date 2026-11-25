@@ -169,6 +169,8 @@ server go in `web/src/lib/server-config.ts`, never behind `NEXT_PUBLIC_`.
 | Scheduled work | `backend/api/core/workers.py` (the 5-minute sweep) |
 | Signed-in sessions and activity figures, account suspension, the admin Command Center | `backend/api/core/activity.py`, `account_status.py`, `command_center.py`, `ADMIN_INTELLIGENCE.md` |
 | Listing rankings, trending score, demand by category and county, seller and buyer performance, anomalies | `backend/api/core/market_intel.py`, `market_models.py`, `ADMIN_INTELLIGENCE.md` |
+| The admin operations workspace (API, database, payments, notifications, calls, background work over time) | `backend/api/core/operations.py`, `ops_metrics.py`, `ops_sampler.py`, `request_metrics.py`, `ADMIN_INTELLIGENCE.md` |
+| The report builder: custom reports, PDFs, schedules and their emails | `backend/api/core/report_builder.py`, `report_pdf.py`, `backend/api/domains/admin/report_builder.py`, `ADMIN_INTELLIGENCE.md` |
 | The Rust extension, chat contact-leak scanning, distances | `backend/native/README.md`, `backend/api/core/native.py`, `text_guard.py`, `geo.py` |
 
 ## APK release workflow — preserve this policy
