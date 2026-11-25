@@ -58,7 +58,7 @@ def metric(
     key: str,
     label: str,
     *,
-    value,
+    value=None,
     previous=None,
     unit: str = "count",
     kind: str = "period",
