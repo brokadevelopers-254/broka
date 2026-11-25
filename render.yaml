@@ -239,6 +239,14 @@ services:
                              # period closes (api/core/admin_reports.py).
       - key: REPORT_TZ_OFFSET_HOURS
         value: "3"           # Report days and weeks start at local midnight: Kenya, EAT = UTC+3.
+      - key: ADMIN_DASHBOARD_URL
+        value: ""            # The admin dashboard's address, for the link in scheduled
+                             # report-builder emails (api/core/report_builder.py). Empty: no link.
+      - key: OPS_SAMPLE_SECONDS
+        value: "60"          # Each process writes its operations counters this often
+                             # (api/core/ops_sampler.py).
+      - key: OPS_SAMPLE_RETENTION_DAYS
+        value: "14"          # Operations samples older than this are deleted.
       - key: PLATFORM_FIXED_MONTHLY_COST_KES
         value: "773"         # Fixed monthly running cost the dashboard's break-even meter uses
                              # (LAUNCH_DISCOUNT_MODEL.md).

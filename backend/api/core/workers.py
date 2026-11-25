@@ -31,6 +31,8 @@ from typing import Any, Callable, Coroutine, Optional
 
 from sqlalchemy import text
 
+from api.core import ops_metrics
+
 logger = logging.getLogger(__name__)
 Task = Callable[..., Coroutine[Any, Any, None]]
 
@@ -64,6 +66,7 @@ class BackgroundWorker:
             await asyncio.wait_for(self._queue.put((fn, kwargs)), timeout=0.1)
         except (asyncio.QueueFull, asyncio.TimeoutError):
             logger.warning("[worker:%s] queue full — dropping task %s", self.name, fn.__name__)
+            ops_metrics.queue_dropped(self.name)
 
     async def _worker(self, wid: int) -> None:
         while self._running:
@@ -73,10 +76,19 @@ class BackgroundWorker:
             fn, kwargs = item
             try:
                 await fn(**kwargs)
+                ops_metrics.queue_done(self.name)
             except Exception as exc:
                 logger.error("[worker:%s-%d] task %s failed: %s", self.name, wid, fn.__name__, exc)
+                ops_metrics.queue_failed(self.name)
             finally:
                 self._queue.task_done()
+
+    def depth(self) -> int:
+        """Tasks waiting in this queue now (not the ones running)."""
+        try:
+            return self._queue.qsize()
+        except Exception:
+            return 0
 
 
 # ── Named queues (in-process) ─────────────────────────────────────────────────
@@ -116,6 +128,7 @@ _message_delivery_task: asyncio.Task | None = None
 _message_delivery_running = False
 _activity_task: asyncio.Task | None = None
 _activity_running = False
+_ops_sample_task: asyncio.Task | None = None
 
 # Chat message pushes that failed (FCM unavailable, a phone offline) or never
 # went (a restart during the debounce) are retried from the delivery rows
@@ -307,12 +320,15 @@ async def _nudge_loop(interval_seconds: int = NUDGE_SWEEP_SECONDS) -> None:
     _nudge_running = True
     logger.info("[nudge] availability sweep started (every %ds)", interval_seconds)
     while _nudge_running:
+        ops_metrics.loop_alive("nudge")
         async with scheduler_lease("broka:scheduler:nudge") as acquired:
             if acquired:
+                pass_started = ops_metrics.pass_started("nudge")
                 try:
                     await task_check_interest_nudges({})
                 except Exception as exc:
                     logger.error("[nudge] availability sweep failed: %s", exc)
+                    ops_metrics.task_failed("nudge", "availability_sweep", exc)
                 # A seller whose listing a buyer marked unavailable is texted
                 # as the report lands; this retries a text that didn't go.
                 # The listing is hidden from every buyer meanwhile, so it
@@ -322,6 +338,7 @@ async def _nudge_loop(interval_seconds: int = NUDGE_SWEEP_SECONDS) -> None:
                     await send_due_texts()
                 except Exception as exc:
                     logger.error("[nudge] unavailable-report text sweep failed: %s", exc)
+                    ops_metrics.task_failed("nudge", "unavailable_report_text_sweep", exc)
                 # Auctions ride this 60s loop rather than the 300s sweep - an
                 # auction end is a deadline bidders are watching in real time. See
                 # task_close_due_auctions.
@@ -329,14 +346,18 @@ async def _nudge_loop(interval_seconds: int = NUDGE_SWEEP_SECONDS) -> None:
                     await task_close_due_auctions({})
                 except Exception as exc:
                     logger.error("[nudge] auction close sweep failed: %s", exc)
+                    ops_metrics.task_failed("nudge", "auction_close_sweep", exc)
                 try:
                     await task_notify_auctions_ending_soon({})
                 except Exception as exc:
                     logger.error("[nudge] auction ending-soon sweep failed: %s", exc)
+                    ops_metrics.task_failed("nudge", "auction_ending_soon_sweep", exc)
                 try:
                     await task_lapse_unpaid_auction_wins({})
                 except Exception as exc:
                     logger.error("[nudge] auction payment-lapse sweep failed: %s", exc)
+                    ops_metrics.task_failed("nudge", "auction_payment_lapse_sweep", exc)
+                ops_metrics.pass_finished("nudge", pass_started)
         await asyncio.sleep(interval_seconds)
 
 
@@ -356,14 +377,17 @@ async def _message_delivery_loop(interval_seconds: int = MESSAGE_DELIVERY_SWEEP_
     logger.info("[delivery] message push retry sweep started (every %ds)", interval_seconds)
     last_summary = None
     while _message_delivery_running:
+        ops_metrics.loop_alive("message_delivery")
         async with scheduler_lease("broka:scheduler:message_delivery") as acquired:
             if acquired:
+                pass_started = ops_metrics.pass_started("message_delivery")
                 try:
                     await message_delivery.retry_due_pushes()
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     logger.error("[delivery] retry sweep failed type=%s", type(exc).__name__)
+                    ops_metrics.task_failed("message_delivery", "retry_sweep", exc)
                 if (last_summary is None
                         or time.monotonic() - last_summary >= MESSAGE_DELIVERY_SUMMARY_SECONDS):
                     last_summary = time.monotonic()
@@ -374,6 +398,8 @@ async def _message_delivery_loop(interval_seconds: int = MESSAGE_DELIVERY_SWEEP_
                         raise
                     except Exception as exc:
                         logger.error("[delivery] summary failed type=%s", type(exc).__name__)
+                        ops_metrics.task_failed("message_delivery", "summary", exc)
+                ops_metrics.pass_finished("message_delivery", pass_started)
         await asyncio.sleep(interval_seconds)
 
 
@@ -389,10 +415,13 @@ async def _periodic_sweep_loop(interval_seconds: int = 300) -> None:
         # was silently finding nothing on every pass for weeks. DEBUG so it
         # costs nothing at the default level, but it is there when needed.
         logger.debug("[sweep] pass starting")
+        ops_metrics.loop_alive("periodic")
         try:
             async with scheduler_lease("broka:scheduler:periodic") as acquired:
                 if acquired:
+                    pass_started = ops_metrics.pass_started("periodic")
                     await _periodic_sweep_pass()
+                    ops_metrics.pass_finished("periodic", pass_started)
         except Exception as exc:
             # A pass that could not take or give back its lease - the
             # database unreachable for the advisory lock, the pool timed
@@ -404,6 +433,7 @@ async def _periodic_sweep_loop(interval_seconds: int = 300) -> None:
             # skipped instead, and the next one tries again. CancelledError
             # is not an Exception: stop_periodic_sweep still ends the loop.
             logger.error("[sweep] pass skipped - %s: %s", type(exc).__name__, exc)
+            ops_metrics.task_failed("periodic", "pass", exc)
         await asyncio.sleep(interval_seconds)
 
 
@@ -414,14 +444,17 @@ async def _periodic_sweep_pass() -> None:
         await task_check_deal_timers({})
     except Exception as exc:
         logger.error("[sweep] deal timer check failed: %s", exc)
+        ops_metrics.task_failed("periodic", "deal_timer_check", exc)
     try:
         await task_reconcile_econfirm_escrows({})
     except Exception as exc:
         logger.error("[sweep] E-Confirm reconciliation failed: %s", exc)
+        ops_metrics.task_failed("periodic", "e_confirm_reconciliation", exc)
     try:
         await task_reconcile_zetupay_payments({})
     except Exception as exc:
         logger.error("[sweep] ZetuPay reconciliation failed: %s", exc)
+        ops_metrics.task_failed("periodic", "zetupay_reconciliation", exc)
     try:
         # This task existed but was registered only with ARQ and never
         # called by the in-app sweep, so in-process deployments never
@@ -430,54 +463,67 @@ async def _periodic_sweep_pass() -> None:
         await task_reconcile_mpesa({}, DATABASE_URL)
     except Exception as exc:
         logger.error("[sweep] M-Pesa reconciliation failed: %s", exc)
+        ops_metrics.task_failed("periodic", "m_pesa_reconciliation", exc)
     try:
         await task_check_dispute_timers()
     except Exception as exc:
         logger.error("[sweep] dispute timer check failed: %s", exc)
+        ops_metrics.task_failed("periodic", "dispute_timer_check", exc)
     try:
         await task_refresh_dispute_summary_cache()
     except Exception as exc:
         logger.error("[sweep] dispute summary cache refresh failed: %s", exc)
+        ops_metrics.task_failed("periodic", "dispute_summary_cache_refresh", exc)
     try:
         await task_recompute_dcr_and_leaks()
     except Exception as exc:
         logger.error("[sweep] DCR/leak recompute failed: %s", exc)
+        ops_metrics.task_failed("periodic", "dcr_leak_recompute", exc)
     try:
         await task_refresh_store_ratings()
     except Exception as exc:
         logger.error("[sweep] store rating refresh failed: %s", exc)
+        ops_metrics.task_failed("periodic", "store_rating_refresh", exc)
     try:
         await task_retrain_ml_models()
     except Exception as exc:
         logger.error("[sweep] ML retrain failed: %s", exc)
+        ops_metrics.task_failed("periodic", "ml_retrain", exc)
     try:
         await task_check_call_expiry()
     except Exception as exc:
         logger.error("[sweep] call expiry check failed: %s", exc)
+        ops_metrics.task_failed("periodic", "call_expiry_check", exc)
     try:
         await task_backfill_media()
     except Exception as exc:
         logger.error("[sweep] media backfill failed: %s", exc)
+        ops_metrics.task_failed("periodic", "media_backfill", exc)
     try:
         await task_collect_abandoned_media()
     except Exception as exc:
         logger.error("[sweep] media clean-up failed: %s", exc)
+        ops_metrics.task_failed("periodic", "media_clean_up", exc)
     try:
         await task_expire_buy_agent_watches()
     except Exception as exc:
         logger.error("[sweep] buy-agent watch expiry failed: %s", exc)
+        ops_metrics.task_failed("periodic", "buy_agent_watch_expiry", exc)
     try:
         await task_sync_listing_stock()
     except Exception as exc:
         logger.error("[sweep] listing stock sync failed: %s", exc)
+        ops_metrics.task_failed("periodic", "listing_stock_sync", exc)
     try:
         await task_store_order_sweep()
     except Exception as exc:
         logger.error("[sweep] store order sweep failed: %s", exc)
+        ops_metrics.task_failed("periodic", "store_order_sweep", exc)
     try:
         await task_notify_expiry_alerts({})
     except Exception as exc:
         logger.error("[sweep] expiry SMS sweep failed: %s", exc)
+        ops_metrics.task_failed("periodic", "expiry_sms_sweep", exc)
     try:
         # Flush buffered usage writes, roll old events into daily
         # totals, and sample provider-exposed infrastructure
@@ -486,6 +532,7 @@ async def _periodic_sweep_pass() -> None:
         await run_cost_maintenance()
     except Exception as exc:
         logger.error("[sweep] service-cost maintenance failed: %s", exc)
+        ops_metrics.task_failed("periodic", "service_cost_maintenance", exc)
     try:
         # Founder briefs for the day, week and month that just
         # closed, written once per period (api/core/admin_reports.py).
@@ -493,6 +540,7 @@ async def _periodic_sweep_pass() -> None:
         await generate_due_reports()
     except Exception as exc:
         logger.error("[sweep] founder report generation failed: %s", exc)
+        ops_metrics.task_failed("periodic", "founder_report_generation", exc)
 
 
 async def task_notify_expiry_alerts(ctx: dict | None = None) -> None:
@@ -632,8 +680,10 @@ async def _activity_loop(interval_seconds: int = 60) -> None:
     _activity_running = True
     logger.info("[activity] session sweep started (every %ds)", interval_seconds)
     while _activity_running:
+        ops_metrics.loop_alive("activity")
         async with scheduler_lease("broka:scheduler:activity") as acquired:
             if acquired:
+                pass_started = ops_metrics.pass_started("activity")
                 try:
                     from api.core import activity
                     await activity.run_sweep()
@@ -641,6 +691,7 @@ async def _activity_loop(interval_seconds: int = 60) -> None:
                     raise
                 except Exception as exc:
                     logger.error("[activity] session sweep failed type=%s", type(exc).__name__)
+                    ops_metrics.task_failed("activity", "session_sweep", exc)
                 # Enforcement never depends on this (a suspension reads as ended
                 # from its own time); the sweep writes the expiry to the history.
                 try:
@@ -650,12 +701,14 @@ async def _activity_loop(interval_seconds: int = 60) -> None:
                     raise
                 except Exception as exc:
                     logger.error("[activity] suspension expiry sweep failed type=%s", type(exc).__name__)
+                    ops_metrics.task_failed("activity", "suspension_expiry_sweep", exc)
+                ops_metrics.pass_finished("activity", pass_started)
         await asyncio.sleep(interval_seconds)
 
 
 async def start_periodic_sweep(interval_seconds: int = 300) -> None:
     global _sweep_task, _nudge_task, _service_communications_task, _message_delivery_task
-    global _activity_task
+    global _activity_task, _ops_sample_task
     _sweep_task = asyncio.create_task(_periodic_sweep_loop(interval_seconds))
     # Separate task, not another entry in the 300s loop - see NUDGE_SWEEP_SECONDS.
     _nudge_task = asyncio.create_task(_nudge_loop())
@@ -670,6 +723,10 @@ async def start_periodic_sweep(interval_seconds: int = 300) -> None:
     _message_delivery_task = asyncio.create_task(_message_delivery_loop())
     # Signed-in sessions and presence (api/core/activity.py).
     _activity_task = asyncio.create_task(_activity_loop())
+    # This process's operations counters, one row a minute (api/core/ops_sampler.py).
+    # Every process, no lease: each one only knows its own requests and pool.
+    from api.core import ops_sampler
+    _ops_sample_task = asyncio.create_task(ops_sampler.run_loop())
     logger.info("[sweep] periodic deal-timer sweep started (every %ds)", interval_seconds)
 
 
@@ -677,14 +734,16 @@ async def stop_periodic_sweep() -> None:
     global _sweep_running, _sweep_task, _nudge_running, _nudge_task
     global _service_communications_running, _service_communications_task
     global _message_delivery_running, _message_delivery_task
-    global _activity_running, _activity_task
+    global _activity_running, _activity_task, _ops_sample_task
     _sweep_running = False
     _nudge_running = False
     _service_communications_running = False
     _message_delivery_running = False
     _activity_running = False
+    from api.core import ops_sampler
+    ops_sampler.stop()
     for task in (_sweep_task, _nudge_task, _service_communications_task, _message_delivery_task,
-                 _activity_task):
+                 _activity_task, _ops_sample_task):
         if task:
             task.cancel()
             try:
@@ -834,14 +893,18 @@ async def _service_communications_loop(interval_seconds: int) -> None:
         interval_seconds,
     )
     while _service_communications_running:
+        ops_metrics.loop_alive("service_communications")
+        pass_started = ops_metrics.pass_started("service_communications")
         try:
             await task_process_service_communications({})
+            ops_metrics.pass_finished("service_communications", pass_started)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.error(
                 "[service_communications] loop pass failed type=%s", type(exc).__name__,
             )
+            ops_metrics.task_failed("service_communications", "pass", exc)
         await asyncio.sleep(interval_seconds)
 
 
@@ -1426,6 +1489,7 @@ async def _notify_after_commit(session, label: str, helper, deal, **kwargs) -> N
         await send()
     except Exception as exc:
         logger.error("[sweep] %s failed for deal %s: %s", label, ref.id, exc)
+        ops_metrics.incr("item_failed.deal_notification")
 
 
 async def _send_seller_nondelivery_sms(deal) -> None:
@@ -2445,6 +2509,7 @@ async def _fire_auto_refund(session, deal) -> None:
             await _mpesa_b2c_refund(buyer.phone, refund_amount, deal.id)
         except Exception as exc:
             logger.error("[sweep] auto-refund B2C call failed for deal %s: %s", deal.id, exc)
+            ops_metrics.incr("item_failed.auto_refund_b2c")
     _queue_after_commit(session, EscrowRefunded(
         deal_id=deal.id, buyer_id=deal.buyer_id, seller_id=deal.seller_id,
         amount=refund_amount,
@@ -2723,6 +2788,7 @@ async def task_close_due_auctions(ctx: dict) -> None:
                 # idempotent, so a partial failure costs a minute, not
                 # correctness.
                 logger.error("[sweep] auction close failed listing=%s: %s", listing_id, exc)
+                ops_metrics.incr("item_failed.auction_close")
         if closed:
             logger.info("[sweep] auctions closed=%d", closed)
 

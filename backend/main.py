@@ -357,6 +357,10 @@ app.include_router(admin_moderation_router, prefix="/admin", tags=["Admin - Mode
 # The Command Center's grouped figures and decisions (api/core/command_center.py).
 from api.domains.admin.command_center import router as admin_command_center_router
 app.include_router(admin_command_center_router, prefix="/admin", tags=["Admin - Command Center"])
+# Operations: API, database, payments, notifications, calls and background
+# work over time (api/core/operations.py, sampled by api/core/ops_sampler.py).
+from api.domains.admin.operations import router as admin_operations_router
+app.include_router(admin_operations_router, prefix="/admin", tags=["Admin - Operations"])
 # Production cost tracking. Mounted at /admin/revenue/costs, a more specific
 # prefix than /admin/revenue, whose handler lives in alerts_revenue.py above.
 app.include_router(

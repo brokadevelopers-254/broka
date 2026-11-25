@@ -198,7 +198,8 @@ def _request_id() -> str:
 
 SLOW_QUERY_MS = max(0.0, float(os.getenv("DB_SLOW_QUERY_MS", "500")))
 POOL_WAIT_WARN_MS = max(0.0, float(os.getenv("DB_POOL_WAIT_WARN_MS", "250")))
-_timing_stats = {"queries": 0, "slow_queries": 0, "pool_waits": 0, "slow_pool_waits": 0}
+_timing_stats = {"queries": 0, "slow_queries": 0, "pool_waits": 0, "slow_pool_waits": 0,
+                 "query_failures": 0}
 
 
 class DbStats:
@@ -331,6 +332,9 @@ def _after_cursor_execute(conn, cursor, statement, parameters, context, executem
 
 def _on_statement_error(exception_context) -> None:
     # A statement that fails (a timeout, a constraint) took its time too.
+    # Counted as well: the operations workspace shows failures per minute
+    # (api/core/ops_sampler.py), which the log alone could not.
+    _timing_stats["query_failures"] += 1
     context = exception_context.execution_context
     started = getattr(context, "_broka_query_started", None)
     if started is not None:
@@ -485,6 +489,11 @@ def db_unavailable_json(exc: BaseException, *, method: str, path: str):
     kind = db_unavailable_kind(exc)
     if kind is None:
         return None
+    try:
+        from api.core import ops_metrics
+        ops_metrics.incr(f"db.unavailable.{kind}")
+    except Exception:
+        pass
     from starlette.responses import JSONResponse
     from api.core.observability import request_id_var, safe_log_path
     try:
@@ -1969,7 +1978,7 @@ async def _apply_optional_statements(conn, statements) -> None:
         await conn.execute(text(prepared))
 
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 SCHEMA_REVISIONS = (
     (1, "legacy_schema_adoption"),
     (2, "durable_payment_intents_and_callbacks"),
@@ -2045,6 +2054,11 @@ SCHEMA_REVISIONS = (
     # users columns are ALTERs above; account_moderation_events is create_all.
     # Without the revision a replica would enforce suspensions it cannot read.
     (21, "account_moderation"),
+    # Operations samples (api/models/ops_sample.py) and the report builder's
+    # definitions and runs (api/models/report_builder.py). New tables only,
+    # from create_all(); without the revision a replica would answer the
+    # operations and report-builder endpoints against missing tables.
+    (22, "reporting_and_operations"),
 )
 
 # Tables/columns that must exist before an API process is safe to serve
@@ -2313,6 +2327,8 @@ async def _init_db_impl():
         ("api.models.admin_report", ("AdminReport",)),
         ("api.models.user_activity", ("UserSession", "UserActivityDay", "ActivitySample")),
         ("api.models.account_moderation", ("AccountModerationEvent",)),
+        ("api.models.ops_sample", ("OpsSample",)),
+        ("api.models.report_builder", ("ReportDefinition", "ReportRun")),
         ("api.models.escrow_provider", ("EscrowProviderRow", "EscrowProviderRevision")),
         ("api.models.store_order", (
             "StoreOrder", "StoreOrderItem", "StoreOrderEvent", "StoreOrderPayment",
