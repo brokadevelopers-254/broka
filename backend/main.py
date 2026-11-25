@@ -191,6 +191,15 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+# ── Account status ────────────────────────────────────────────────────────────
+# Refuses every request that carries a suspended account's access token, HTTP
+# and WebSocket alike (api/core/account_status.py). Added first, so it is the
+# innermost middleware: its refusals carry the request id and CORS headers, and
+# are logged and counted like any other answer. A browser would otherwise see a
+# CORS failure instead of the 403.
+from api.core.account_status import AccountStatusMiddleware  # noqa: E402
+app.add_middleware(AccountStatusMiddleware)
+
 # ── Observability (Sentry + request IDs + latency logging + Prometheus) ───────
 init_observability(app)
 
@@ -217,12 +226,6 @@ app.add_middleware(JsonCompressionMiddleware)
 # Added last, so it runs first: an oversized body is refused before any
 # other middleware or route reads it. See api/core/body_limit.py.
 app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_mb * 1024 * 1024)
-
-# Refuses every request that carries a suspended account's access token, HTTP
-# and WebSocket alike (api/core/account_status.py). Added after the size limit,
-# so it runs before it: a suspended account is refused before anything else.
-from api.core.account_status import AccountStatusMiddleware
-app.add_middleware(AccountStatusMiddleware)
 
 
 # ── Validation errors ─────────────────────────────────────────────────────────
@@ -351,6 +354,9 @@ app.include_router(admin_activity_router, prefix="/admin", tags=["Admin - Activi
 # Restriction, suspension and reinstatement (api/domains/admin/moderation.py).
 from api.domains.admin.moderation import router as admin_moderation_router
 app.include_router(admin_moderation_router, prefix="/admin", tags=["Admin - Moderation"])
+# The Command Center's grouped figures and decisions (api/core/command_center.py).
+from api.domains.admin.command_center import router as admin_command_center_router
+app.include_router(admin_command_center_router, prefix="/admin", tags=["Admin - Command Center"])
 # Production cost tracking. Mounted at /admin/revenue/costs, a more specific
 # prefix than /admin/revenue, whose handler lives in alerts_revenue.py above.
 app.include_router(
