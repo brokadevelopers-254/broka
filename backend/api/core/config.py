@@ -500,6 +500,14 @@ class Settings:
     #   Anything else refuses to start (validate_startup).
     native_mode: str = field(default_factory=lambda: os.getenv("BROKA_NATIVE", "auto").strip().lower() or "auto")
 
+    # ── Marketplace intelligence (api/core/market_intel.py) ──────────────────
+    # Overrides for the listing score's weights, as "views=1,saves=2,...".
+    # Empty keeps market_intel.DEFAULT_WEIGHTS. A bad entry is ignored and
+    # logged, never fatal. The weights in force are returned with every ranking.
+    market_trending_weights: str = field(default_factory=lambda: os.getenv(
+        "MARKET_TRENDING_WEIGHTS", ""
+    ).strip())
+
     # ── Activity retention (api/core/activity.py) ────────────────────────────
     # Session rows hold when a device was signed in, how long it was in the
     # foreground, and why it ended. They hold no contact details, device
