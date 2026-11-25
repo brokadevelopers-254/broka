@@ -119,11 +119,10 @@ async def _seed() -> dict:
         await db.flush()
 
         db.add_all([
-            # One person opening one listing twice is one view.
+            # BROKA keeps one row per account and listing: the first time it was opened.
             ListingView(listing_id=old.id, viewer_id=viewer_a.id, created_at=cur),
-            ListingView(listing_id=old.id, viewer_id=viewer_a.id, created_at=cur + timedelta(hours=1)),
             ListingView(listing_id=old.id, viewer_id=viewer_b.id, created_at=cur),
-            ListingView(listing_id=old.id, viewer_id=viewer_a.id, created_at=prev),
+            ListingView(listing_id=previous_listing.id, viewer_id=viewer_a.id, created_at=prev),
             Wishlist(user_id=viewer_a.id, listing_id=old.id, created_at=cur),
             ListingLike(user_id=viewer_b.id, listing_id=old.id, created_at=cur),
             # Activity: tracking began 30 days back; A is active now and was before,
@@ -236,7 +235,7 @@ class TestMarketplace:
         f = _figures(report)
         assert (f["total_listings"]["value"], f["total_listings"]["previous"]) == (3, 2)
         assert (f["new_listings"]["value"], f["new_listings"]["previous"]) == (1, 1)
-        assert (f["unique_listing_views"]["value"], f["unique_listing_views"]["previous"]) == (2, 1)
+        assert (f["first_listing_views"]["value"], f["first_listing_views"]["previous"]) == (2, 1)
         assert (f["saves_and_likes"]["value"], f["saves_and_likes"]["previous"]) == (2, 0)
         assert f["live_listings"]["previous"] is None, "no status history is kept"
 

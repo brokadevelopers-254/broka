@@ -321,14 +321,12 @@ async def command_center(db: AsyncSession, *, window_days: int = 7, now: Optiona
     sold_out_c, sold_out_p = _pulse_metric(pulse, "sold_out_reports")
     starts_c, starts_p = _pulse_metric(pulse, "conversations_started")
 
-    async def unique_views(start: datetime, end: datetime) -> int:
-        pairs = (
-            select(ListingView.viewer_id, ListingView.listing_id)
-            .where(ListingView.created_at >= start, ListingView.created_at < end,
-                   ListingView.viewer_id.not_in(staff))
-            .distinct().subquery()
-        )
-        return int((await db.execute(select(func.count()).select_from(pairs))).scalar() or 0)
+    async def first_views(start: datetime, end: datetime) -> int:
+        # One listing_views row per account and listing, written the first
+        # time that account opens it (listings/service.py), so a count of rows
+        # is a count of first views: repeat opens are never in it.
+        return await count(ListingView.id, ListingView.created_at >= start, ListingView.created_at < end,
+                           ListingView.viewer_id.not_in(staff))
 
     async def saves_and_likes(start: datetime, end: datetime) -> int:
         saves = await count(Wishlist.id, Wishlist.created_at >= start, Wishlist.created_at < end,
@@ -350,9 +348,10 @@ async def command_center(db: AsyncSession, *, window_days: int = 7, now: Optiona
         metric("unavailable_reports", "Reported unavailable", value=sold_out_c, previous=sold_out_p,
                good="down", href="/intelligence",
                definition="Buyer reports that a listing was no longer available, not withdrawn by the buyer."),
-        metric("unique_listing_views", "Unique listing views",
-               value=await unique_views(cs, ce), previous=await unique_views(ps, pe), href="/market",
-               definition="Distinct viewer and listing pairs: one person opening one listing ten times counts once."),
+        metric("first_listing_views", "First listing views",
+               value=await first_views(cs, ce), previous=await first_views(ps, pe), href="/market",
+               definition=("Signed-in accounts opening a listing for the first time in the period. BROKA keeps "
+                           "only the first view per account and listing, so repeat opens and guests are not counted.")),
         metric("saves_and_likes", "Saves and likes",
                value=await saves_and_likes(cs, ce), previous=await saves_and_likes(ps, pe), href="/market",
                definition="Wishlist saves plus likes added in the period by non-staff accounts."),
