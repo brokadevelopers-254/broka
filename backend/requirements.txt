@@ -33,7 +33,12 @@ redis[hiredis]>=5.0.0      # Async Redis client + fast parser
 arq>=0.26.1                # Redis-backed async job queue
 
 # ─── Observability ─────────────────────────────────────────────────────────────
-sentry-sdk[fastapi]>=2.0.0
+# Below 3: with sentry-sdk 3.0.0, tests/test_reconciliation_alerts.py fails
+# test_one_structured_event_per_alert and never finishes
+# test_a_stuck_deal_is_not_resent_every_sweep, so CI's backend jobs run until
+# the runner is shut down. With 2.75.0 both pass. Lift the cap in the change
+# that makes them pass on 3.x.
+sentry-sdk[fastapi]>=2.0.0,<3
 prometheus-fastapi-instrumentator>=7.0.0,<7.1.0
 opentelemetry-api>=1.25.0
 opentelemetry-sdk>=1.25.0
