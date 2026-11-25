@@ -53,10 +53,10 @@ Where things usually are:
 
 ## Backend endpoints
 
-414 endpoints served by `backend/main.py`. **Auth** is read from each
+421 endpoints served by `backend/main.py`. **Auth** is read from each
 handler's dependencies: `public` (none), `optional` (a token is used if sent),
 `user` (sign-in required), `admin`, `token` (WebSocket, checks its own token).
-Counts: admin 104, optional 7, public 72, token 6, user 225.
+Counts: admin 111, optional 7, public 72, token 6, user 225.
 
 | Method | Path | Auth | Handler |
 |---|---|---|---|
@@ -117,6 +117,13 @@ Counts: admin 104, optional 7, public 72, token 6, user 225.
 | GET | `/admin/intelligence/funnel` | admin | `intelligence_funnel` (backend/api/domains/admin/intelligence.py:96) |
 | GET | `/admin/intelligence/geography` | admin | `intelligence_geography` (backend/api/domains/admin/intelligence.py:87) |
 | GET | `/admin/intelligence/insights` | admin | `intelligence_insights` (backend/api/domains/admin/intelligence.py:57) |
+| GET | `/admin/intelligence/market/anomalies` | admin | `market_anomalies` (backend/api/domains/admin/intelligence.py:210) |
+| POST | `/admin/intelligence/market/anomalies/scan` | admin | `market_anomalies_scan` (backend/api/domains/admin/intelligence.py:219) |
+| GET | `/admin/intelligence/market/demand` | admin | `market_demand` (backend/api/domains/admin/intelligence.py:174) |
+| GET | `/admin/intelligence/market/listings/{listing_id}` | admin | `market_listing_detail` (backend/api/domains/admin/intelligence.py:184) |
+| GET | `/admin/intelligence/market/models` | admin | `market_models_report` (backend/api/domains/admin/intelligence.py:236) |
+| GET | `/admin/intelligence/market/performance` | admin | `market_performance` (backend/api/domains/admin/intelligence.py:197) |
+| GET | `/admin/intelligence/market/rankings` | admin | `market_rankings` (backend/api/domains/admin/intelligence.py:158) |
 | GET | `/admin/intelligence/pulse` | admin | `intelligence_pulse` (backend/api/domains/admin/intelligence.py:46) |
 | GET | `/admin/intelligence/sellers` | admin | `intelligence_sellers` (backend/api/domains/admin/intelligence.py:123) |
 | GET | `/admin/ledger-integrity` | admin | `ledger_integrity` (backend/api/domains/admin/router.py:1899) |
@@ -125,10 +132,10 @@ Counts: admin 104, optional 7, public 72, token 6, user 225.
 | POST | `/admin/media/backfill` | admin | `run_media_backfill` (backend/api/domains/admin/router.py:2119) |
 | GET | `/admin/ops-snapshot` | admin | `ops_snapshot` (backend/api/domains/admin/router.py:376) |
 | GET | `/admin/payments` | admin | `admin_payments` (backend/api/domains/admin/router.py:1226) |
-| GET | `/admin/reports` | admin | `list_reports` (backend/api/domains/admin/intelligence.py:141) |
-| POST | `/admin/reports/generate` | admin | `generate_report` (backend/api/domains/admin/intelligence.py:205) |
-| GET | `/admin/reports/preview` | admin | `preview_report` (backend/api/domains/admin/intelligence.py:175) |
-| GET | `/admin/reports/{report_id}` | admin | `get_report` (backend/api/domains/admin/intelligence.py:240) |
+| GET | `/admin/reports` | admin | `list_reports` (backend/api/domains/admin/intelligence.py:253) |
+| POST | `/admin/reports/generate` | admin | `generate_report` (backend/api/domains/admin/intelligence.py:317) |
+| GET | `/admin/reports/preview` | admin | `preview_report` (backend/api/domains/admin/intelligence.py:287) |
+| GET | `/admin/reports/{report_id}` | admin | `get_report` (backend/api/domains/admin/intelligence.py:352) |
 | GET | `/admin/revenue` | admin | `admin_revenue` (backend/api/domains/admin/alerts_revenue.py:259) |
 | GET | `/admin/revenue/costs/adjustments` | admin | `list_cost_adjustments` (backend/api/domains/service_costs/router.py:189) |
 | GET | `/admin/revenue/costs/entries` | admin | `list_cost_entries` (backend/api/domains/service_costs/router.py:168) |
@@ -768,6 +775,8 @@ Counts: admin 104, optional 7, public 72, token 6, user 225.
 - `interest_arming.py` — Arms the seller availability nudge from the buyer's own messages.
 - `ledger.py`
 - `legal_documents.py` — The legal documents a new BROKA account must accept, and the versions this backend accepts.
+- `market_intel.py` — Listing and marketplace intelligence: rankings, conversion, attention, listing detail, demand growth and seller / buyer performance.
+- `market_models.py` — Anomaly detection, validated forecasts, churn / supply / payment models and data-traceable recommendations for the admin dashboard.
 - `media_storage.py` — Where image bytes live: Cloudflare R2, or the database as a fallback.
 - `message_delivery.py` — What happened to every chat message, per recipient - and the log of it.
 - `message_push.py` — Push every chat message to the person it is for, app open or not.
@@ -971,7 +980,7 @@ What each `backend/api/domains/<area>` imports from other domains and from
 `api/core` (imports inside functions included). Useful for the blast radius
 of a change.
 
-- **admin** — domains: escrow, listings, media; core: account_status, activity, admin_alerts, admin_reports, ai_cost, analytics, audit, client_ip, command_center, config, econfirm_client, event_catalog, fraud, insights, intelligence, ledger, money, observability, permissions, revenue, timeutil, workflow; database
+- **admin** — domains: escrow, listings, media; core: account_status, activity, admin_alerts, admin_reports, ai_cost, analytics, audit, client_ip, command_center, config, econfirm_client, event_catalog, fraud, insights, intelligence, ledger, market_intel, market_models, money, observability, permissions, revenue, timeutil, workflow; database
 - **admin_email** — core: audit, client_ip, email, idempotency, observability, permissions, rate_limit; database
 - **ai_broker** — domains: categories, listings, pricing; core: circuit_breaker, config, cost_ledger, gemini, ml, rate_limit; database, security
 - **auction_ws** — core: auction_hub; security
@@ -1043,11 +1052,11 @@ of a change.
 Read by `backend/api/core/config.py`; documented in `.env.example` and
 `render.yaml`. The web storefront's are in `web/.env.example`.
 
-`ACCESS_TOKEN_EXPIRE_MINUTES`, `ACTIVITY_DAY_RETENTION_DAYS`, `ACTIVITY_SAMPLE_RETENTION_DAYS`, `ACTIVITY_SESSION_RETENTION_DAYS`, `ADMIN_BOOTSTRAP_EMAIL`, `ADMIN_REPORTS_ENABLED`, `AI_COVERS_ENABLED`, `AI_DEEPSEEK_INPUT_PER_1M_USD`, `AI_DEEPSEEK_OUTPUT_PER_1M_USD`, `AI_FREE_PROVIDERS`, `AI_USD_TO_KES`, `ALLOWED_ORIGINS`, `AT_API_KEY`, `AT_SENDER_ID`, `AT_USERNAME`, `AUCTIONS_ENABLED`, `AUCTION_DEFAULT_DURATION_HOURS`, `AUCTION_DEFAULT_MIN_INCREMENT`, `AUCTION_ENDING_SOON_MINUTES`, `AUCTION_FUNDING_SETTLE_MINUTES`, `AUCTION_PAYMENT_DEADLINE_HOURS`, `BROKA_ADMIN_EMAIL_FROM`, `BROKA_NATIVE`, `BUY_AGENT_MAX_ACTIVE`, `BUY_AGENT_WATCH_DAYS`, `CALL_RINGING_PRECONNECT`, `CALL_TOKEN_EXPIRE_MINUTES`, `CLIENT_IP_HEADER`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_TURN_API_TOKEN`, `CLOUDFLARE_TURN_KEY_ID`, `DATABASE_URL`, `DCR_ENABLED`, `DEBUG`, `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_TIMEOUT_SECONDS`, `ECONFIRM_API_KEY`, `ECONFIRM_BASE_URL`, `ECONFIRM_FALLBACK_EMAIL_DOMAIN`, `ECONFIRM_MAX_POLL_SECONDS`, `ECONFIRM_POLL_INTERVAL_SECONDS`, `ECONFIRM_TIMEOUT_SECONDS`, `ENV`, `ENVIRONMENT`, `ESCROW_GUIDANCE_ENABLED`, `ESCROW_PRICING_MAX_AGE_DAYS`, `ESCROW_PROVIDER_DOMAINS`, `ESCROW_RECORD_MAX_AGE_DAYS`, `EXPIRY_SMS_DAYS_BEFORE`, `EXPIRY_SMS_ENABLED`, `FOUNDING_DISCOUNT_DAYS`, `FOUNDING_SELLER_TIERS`, `FREE_LISTINGS_PER_SELLER`, `FREE_LISTING_OFFER_DAYS`, `FREE_LISTING_OFFER_LIMIT`, `FREE_STORE_OFFER_DAYS`, `FREE_STORE_OFFER_LIMIT`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `GROQ_API_KEY`, `HF_SHOWCASE_MODEL`, `HF_TOKEN`, `IN_APP_PAYMENTS_ENABLED`, `LISTING_FEES_ENABLED`, `MAX_REQUEST_BODY_MB`, `MEDIA_PUBLIC_BASE_URL`, `MOBITECH_API_KEY`, `MOBITECH_BASE_URL`, `MOBITECH_SENDER_NAME`, `MOBITECH_SEND_ENDPOINT`, `MPESA_B2C_CREDENTIAL`, `MPESA_B2C_INITIATOR`, `MPESA_B2C_RESULT_URL`, `MPESA_B2C_TIMEOUT_URL`, `MPESA_CALLBACK_SECRET`, `MPESA_CALLBACK_URL`, `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET`, `MPESA_ENV`, `MPESA_FEATURED_CALLBACK_URL`, `MPESA_LISTING_FEE_CALLBACK_URL`, `MPESA_PASSKEY`, `MPESA_PREMIUM_CALLBACK_URL`, `MPESA_SHORTCODE`, `MPESA_STORE_CALLBACK_URL`, `MPESA_VERIFY_CALLBACK_URL`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `OTP_EXPIRY_SECONDS`, `OTP_LENGTH`, `OTP_MAX_ATTEMPTS`, `PHONE_VERIFY_TOKEN_EXPIRE_MINUTES`, `PLATFORM_FIXED_MONTHLY_COST_KES`, `PREMIUM_ENABLED`, `PUBLIC_API_BASE_URL`, `R2_ACCESS_KEY_ID`, `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_SECRET_ACCESS_KEY`, `REDIS_URL`, `REFRESH_TOKEN_EXPIRE_DAYS`, `RENDER`, `REPORT_TZ_OFFSET_HOURS`, `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `SECRET_KEY`, `SENTRY_DSN`, `SERVICE_COMMUNICATION_ANNOUNCEMENT_TTL_DAYS`, `SERVICE_COMMUNICATION_CLAIM_SECONDS`, `SERVICE_COMMUNICATION_COMMUNICATION_BATCH`, `SERVICE_COMMUNICATION_MAX_ATTEMPTS`, `SERVICE_COMMUNICATION_MAX_AUDIENCE`, `SERVICE_COMMUNICATION_MAX_EXPLICIT_RECIPIENTS`, `SERVICE_COMMUNICATION_PROVIDER_CONCURRENCY`, `SERVICE_COMMUNICATION_PROVIDER_TIMEOUT_SECONDS`, `SERVICE_COMMUNICATION_RECIPIENT_BATCH`, `SERVICE_COMMUNICATION_RETENTION_DAYS`, `SERVICE_COMMUNICATION_RETRY_BASE_SECONDS`, `SERVICE_COMMUNICATION_RETRY_MAX_SECONDS`, `SERVICE_COMMUNICATION_SWEEP_SECONDS`, `SERVICE_USAGE_ENABLED`, `SERVICE_USAGE_RETENTION_DAYS`, `SMS_COST_MINOR_AT`, `SMS_COST_MINOR_MOBITECH`, `SMS_COST_MINOR_TEXIN`, `STOREFRONT_API_KEY`, `STORE_BILLING_ENABLED`, `STORE_BILLING_GRACE_DAYS`, `STORE_LINK_BASE`, `STORE_ORDER_MAX_OPEN_PER_STORE`, `STORE_ORDER_RESERVATION_HOURS`, `STORE_ORDER_SELLER_RESPONSE_HOURS`, `TEXIN_API_KEY`, `TEXIN_BASE_URL`, `TEXIN_SENDER_ID`, `TEXIN_TIMEOUT_SECONDS`, `TEXIN_WEBHOOK_SECRET`, `THREAD_TOKEN_EXPIRE_HOURS`, `TRUSTED_PROXY_HOPS`, `VERIFIED_BADGE_ENABLED`, `ZAC_SECRET`, `ZENO_FREE_AGENT_SESSIONS_PER_DAY`, `ZENO_FREE_LISTING_SESSIONS_PER_DAY`, `ZETUPAY_BASE_URL`, `ZETUPAY_ENABLED`, `ZETUPAY_FEE_PCT`, `ZETUPAY_SECRET_KEY`, `ZETUPAY_TIMEOUT_SECONDS`
+`ACCESS_TOKEN_EXPIRE_MINUTES`, `ACTIVITY_DAY_RETENTION_DAYS`, `ACTIVITY_SAMPLE_RETENTION_DAYS`, `ACTIVITY_SESSION_RETENTION_DAYS`, `ADMIN_BOOTSTRAP_EMAIL`, `ADMIN_REPORTS_ENABLED`, `AI_COVERS_ENABLED`, `AI_DEEPSEEK_INPUT_PER_1M_USD`, `AI_DEEPSEEK_OUTPUT_PER_1M_USD`, `AI_FREE_PROVIDERS`, `AI_USD_TO_KES`, `ALLOWED_ORIGINS`, `AT_API_KEY`, `AT_SENDER_ID`, `AT_USERNAME`, `AUCTIONS_ENABLED`, `AUCTION_DEFAULT_DURATION_HOURS`, `AUCTION_DEFAULT_MIN_INCREMENT`, `AUCTION_ENDING_SOON_MINUTES`, `AUCTION_FUNDING_SETTLE_MINUTES`, `AUCTION_PAYMENT_DEADLINE_HOURS`, `BROKA_ADMIN_EMAIL_FROM`, `BROKA_NATIVE`, `BUY_AGENT_MAX_ACTIVE`, `BUY_AGENT_WATCH_DAYS`, `CALL_RINGING_PRECONNECT`, `CALL_TOKEN_EXPIRE_MINUTES`, `CLIENT_IP_HEADER`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_TURN_API_TOKEN`, `CLOUDFLARE_TURN_KEY_ID`, `DATABASE_URL`, `DCR_ENABLED`, `DEBUG`, `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_TIMEOUT_SECONDS`, `ECONFIRM_API_KEY`, `ECONFIRM_BASE_URL`, `ECONFIRM_FALLBACK_EMAIL_DOMAIN`, `ECONFIRM_MAX_POLL_SECONDS`, `ECONFIRM_POLL_INTERVAL_SECONDS`, `ECONFIRM_TIMEOUT_SECONDS`, `ENV`, `ENVIRONMENT`, `ESCROW_GUIDANCE_ENABLED`, `ESCROW_PRICING_MAX_AGE_DAYS`, `ESCROW_PROVIDER_DOMAINS`, `ESCROW_RECORD_MAX_AGE_DAYS`, `EXPIRY_SMS_DAYS_BEFORE`, `EXPIRY_SMS_ENABLED`, `FOUNDING_DISCOUNT_DAYS`, `FOUNDING_SELLER_TIERS`, `FREE_LISTINGS_PER_SELLER`, `FREE_LISTING_OFFER_DAYS`, `FREE_LISTING_OFFER_LIMIT`, `FREE_STORE_OFFER_DAYS`, `FREE_STORE_OFFER_LIMIT`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `GROQ_API_KEY`, `HF_SHOWCASE_MODEL`, `HF_TOKEN`, `IN_APP_PAYMENTS_ENABLED`, `LISTING_FEES_ENABLED`, `MARKET_TRENDING_WEIGHTS`, `MAX_REQUEST_BODY_MB`, `MEDIA_PUBLIC_BASE_URL`, `MOBITECH_API_KEY`, `MOBITECH_BASE_URL`, `MOBITECH_SENDER_NAME`, `MOBITECH_SEND_ENDPOINT`, `MPESA_B2C_CREDENTIAL`, `MPESA_B2C_INITIATOR`, `MPESA_B2C_RESULT_URL`, `MPESA_B2C_TIMEOUT_URL`, `MPESA_CALLBACK_SECRET`, `MPESA_CALLBACK_URL`, `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET`, `MPESA_ENV`, `MPESA_FEATURED_CALLBACK_URL`, `MPESA_LISTING_FEE_CALLBACK_URL`, `MPESA_PASSKEY`, `MPESA_PREMIUM_CALLBACK_URL`, `MPESA_SHORTCODE`, `MPESA_STORE_CALLBACK_URL`, `MPESA_VERIFY_CALLBACK_URL`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `OTP_EXPIRY_SECONDS`, `OTP_LENGTH`, `OTP_MAX_ATTEMPTS`, `PHONE_VERIFY_TOKEN_EXPIRE_MINUTES`, `PLATFORM_FIXED_MONTHLY_COST_KES`, `PREMIUM_ENABLED`, `PUBLIC_API_BASE_URL`, `R2_ACCESS_KEY_ID`, `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_SECRET_ACCESS_KEY`, `REDIS_URL`, `REFRESH_TOKEN_EXPIRE_DAYS`, `RENDER`, `REPORT_TZ_OFFSET_HOURS`, `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `SECRET_KEY`, `SENTRY_DSN`, `SERVICE_COMMUNICATION_ANNOUNCEMENT_TTL_DAYS`, `SERVICE_COMMUNICATION_CLAIM_SECONDS`, `SERVICE_COMMUNICATION_COMMUNICATION_BATCH`, `SERVICE_COMMUNICATION_MAX_ATTEMPTS`, `SERVICE_COMMUNICATION_MAX_AUDIENCE`, `SERVICE_COMMUNICATION_MAX_EXPLICIT_RECIPIENTS`, `SERVICE_COMMUNICATION_PROVIDER_CONCURRENCY`, `SERVICE_COMMUNICATION_PROVIDER_TIMEOUT_SECONDS`, `SERVICE_COMMUNICATION_RECIPIENT_BATCH`, `SERVICE_COMMUNICATION_RETENTION_DAYS`, `SERVICE_COMMUNICATION_RETRY_BASE_SECONDS`, `SERVICE_COMMUNICATION_RETRY_MAX_SECONDS`, `SERVICE_COMMUNICATION_SWEEP_SECONDS`, `SERVICE_USAGE_ENABLED`, `SERVICE_USAGE_RETENTION_DAYS`, `SMS_COST_MINOR_AT`, `SMS_COST_MINOR_MOBITECH`, `SMS_COST_MINOR_TEXIN`, `STOREFRONT_API_KEY`, `STORE_BILLING_ENABLED`, `STORE_BILLING_GRACE_DAYS`, `STORE_LINK_BASE`, `STORE_ORDER_MAX_OPEN_PER_STORE`, `STORE_ORDER_RESERVATION_HOURS`, `STORE_ORDER_SELLER_RESPONSE_HOURS`, `TEXIN_API_KEY`, `TEXIN_BASE_URL`, `TEXIN_SENDER_ID`, `TEXIN_TIMEOUT_SECONDS`, `TEXIN_WEBHOOK_SECRET`, `THREAD_TOKEN_EXPIRE_HOURS`, `TRUSTED_PROXY_HOPS`, `VERIFIED_BADGE_ENABLED`, `ZAC_SECRET`, `ZENO_FREE_AGENT_SESSIONS_PER_DAY`, `ZENO_FREE_LISTING_SESSIONS_PER_DAY`, `ZETUPAY_BASE_URL`, `ZETUPAY_ENABLED`, `ZETUPAY_FEE_PCT`, `ZETUPAY_SECRET_KEY`, `ZETUPAY_TIMEOUT_SECONDS`
 
 ## Backend tests
 
-186 files in `backend/tests/`.
+188 files in `backend/tests/`.
 
 - `test_account_moderation.py` — Restriction, suspension and reinstatement, enforced by the backend.
 - `test_admin_additions.py` — Admin additions: SMS cost hook, timeseries, detail reads, users search.
@@ -1057,6 +1066,7 @@ Read by `backend/api/core/config.py`; documented in `.env.example` and
 - `test_admin_email.py` — Admin Email Reply: POST /admin/email/send.
 - `test_admin_hardening_v2.py` — Admin endpoints that answered wrongly, each with the case that exposed it.
 - `test_admin_intelligence.py` — Founder intelligence and reports: the figures, the advice and the archive.
+- `test_admin_market_intel.py` — Listing / marketplace intelligence, anomaly detection and models.
 - `test_admin_revenue.py` — Revenue endpoint: income/cost/profit math, grouping, buckets, no double count.
 - `test_ai_broker_deepseek.py` — Tests for DeepSeek V4 Flash - DIRECT API integration in the AI broker (api/domains/ai_broker/service.py).
 - `test_ai_broker_v4.py` — Tests for AI broker with circuit breaker integration (v4.0).
@@ -1145,6 +1155,7 @@ Read by `backend/api/core/config.py`; documented in `.env.example` and
 - `test_listing_stock.py` — BROKA - Listing stock, sold-out listings, and deleting a listing Run: pytest backend/tests/test_listing_stock.py -v
 - `test_listings.py` — BROKA - Listings Endpoint Tests Run: pytest backend/tests/test_listings.py -v
 - `test_log_redaction.py` — Ordinary logs must not become a second store of credentials or receipts.
+- `test_market_intelligence_stages.py` — Listing intelligence past the first contact: negotiation, deals, completion, attention over time, buyers left waiting, demand growth and se…
 - `test_marketing_sidekick.py` — The AI Marketing Sidekick, platform playbooks, video scripts and Meta Ads guidance.
 - `test_media_assets.py` — Image assets: processing, storage, upload, and what listings and stores do with them (Online Stores phase 1).
 - `test_media_cleanup.py` — Uploads nothing ever used are removed; everything else is kept.
