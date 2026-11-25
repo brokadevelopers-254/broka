@@ -223,7 +223,8 @@ async def _active_counts(db: AsyncSession, now: datetime) -> tuple[int, int]:
         select(
             func.count(distinct(UserSession.user_id)),
             func.count(UserSession.id),
-        ).where(UserSession.ended_at.is_(None), UserSession.last_active_at >= cutoff)
+        ).where(UserSession.ended_at.is_(None), UserSession.last_active_at >= cutoff,
+                UserSession.last_active_at <= now)
     )).one()
     return int(row[0] or 0), int(row[1] or 0)
 
@@ -324,9 +325,11 @@ async def live_snapshot(db: AsyncSession, *, now: Optional[datetime] = None) -> 
     windows: dict[str, int] = {}
     for minutes in (5, 15, 60):
         cutoff = now - timedelta(minutes=minutes)
+        # Bounded at `now` too: a figure for a moment must not count beats
+        # stamped after it (a replica's clock running ahead, or a past `now`).
         value = (await db.execute(
             select(func.count(distinct(UserSession.user_id)))
-            .where(UserSession.last_active_at >= cutoff)
+            .where(UserSession.last_active_at >= cutoff, UserSession.last_active_at <= now)
         )).scalar()
         windows[f"last_{minutes}m"] = int(value or 0)
 
@@ -337,13 +340,15 @@ async def live_snapshot(db: AsyncSession, *, now: Optional[datetime] = None) -> 
 
     peak = (await db.execute(
         select(ActivitySample.active_users, ActivitySample.sampled_at)
-        .where(ActivitySample.sampled_at >= now - timedelta(hours=_PEAK_WINDOW_HOURS))
+        .where(ActivitySample.sampled_at >= now - timedelta(hours=_PEAK_WINDOW_HOURS),
+               ActivitySample.sampled_at <= now)
         .order_by(desc(ActivitySample.active_users), desc(ActivitySample.sampled_at))
         .limit(1)
     )).first()
     samples_in_window = int((await db.execute(
         select(func.count(ActivitySample.sampled_at))
-        .where(ActivitySample.sampled_at >= now - timedelta(hours=_PEAK_WINDOW_HOURS))
+        .where(ActivitySample.sampled_at >= now - timedelta(hours=_PEAK_WINDOW_HOURS),
+               ActivitySample.sampled_at <= now)
     )).scalar() or 0)
 
     coverage = await _coverage_start(db)

@@ -267,6 +267,39 @@ class TestSilentSessions:
         assert row.ended_at == T0
 
 
+# ── several devices ──────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+class TestSeveralDevices:
+    async def test_two_phones_are_two_sessions_but_one_active_account(self):
+        # A moment no other test in this module writes near.
+        now = datetime(2022, 8, 1, 12, 0, 0)
+        both, single, gone = await _user(), await _user(), await _user()
+        await _session(both.id, started_at=now - timedelta(minutes=30), last_active_at=now - timedelta(minutes=1))
+        await _session(both.id, started_at=now - timedelta(minutes=10), last_active_at=now - timedelta(minutes=2))
+        await _session(single.id, started_at=now - timedelta(minutes=20), last_active_at=now - timedelta(minutes=12))
+        await _session(gone.id, started_at=now - timedelta(minutes=9), last_active_at=now - timedelta(minutes=1),
+                       ended_at=now - timedelta(minutes=1), end_reason="logout")
+
+        async with AsyncSessionLocal() as db:
+            live = await activity.live_snapshot(db, now=now)
+        assert live["active_users_now"] == 1, "two phones are still one account"
+        assert live["active_sessions_now"] == 2
+        assert live["active_users"]["last_5m"] == 2, "the account that signed out was active a minute ago"
+        assert live["active_users"]["last_15m"] == 3
+
+    async def test_signing_out_one_phone_keeps_the_other_signed_in(self, client):
+        user = await _user()
+        first = await _login(client, user)
+        second = await _login(client, user)
+        r = await client.post("/auth/token/revoke", json={"refresh_token": first["refresh_token"]})
+        assert r.status_code == 204
+        ended = await _session_row(decode_access_token(first["access_token"])["sid"])
+        still = await _session_row(decode_access_token(second["access_token"])["sid"])
+        assert ended.end_reason == "logout"
+        assert still.ended_at is None
+
+
 # ── signed-in sessions over HTTP ─────────────────────────────────────────────
 
 async def _login(client, user: User) -> dict:
