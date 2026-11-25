@@ -25,7 +25,7 @@ import math
 import statistics
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
-from typing import Any, Optional
+from typing import Optional
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession

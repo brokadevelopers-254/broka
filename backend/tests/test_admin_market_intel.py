@@ -135,7 +135,8 @@ async def test_listing_detail_shows_funnel_and_daily_series(client, market):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["totals"]["viewers"] == 3
-    assert body["funnel"] == {"viewers": 3, "savers_or_likers": 2, "contacters": 2, "deals_agreed": 0}
+    assert body["funnel"] == {"viewers": 3, "savers_or_likers": 2, "contacters": 2, "negotiators": 0,
+                              "deals_agreed": 0, "deals_completed": 0}
     assert sum(d["views"] for d in body["daily"]) == 3
     assert sum(d["contacts"] for d in body["daily"]) == 2
     assert body["category_position"]["viewers_rank"] == 1

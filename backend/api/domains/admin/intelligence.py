@@ -133,15 +133,51 @@ async def intelligence_sellers(
 # performance) and api/core/market_models.py (anomalies, forecasts, models).
 # All reads; the scan only writes deduplicated admin alerts and an audit row.
 
+MAX_MARKET_RANGE_DAYS = 90
+
+
+def _market_range(from_raw: Optional[str], to_raw: Optional[str]) -> tuple[Optional[datetime], Optional[datetime]]:
+    """A custom [from, to) range, or (None, None) to use window_days.
+
+    The end is held at now: a range reaching into the future would count a
+    buyer's wait for a reply up to a moment that has not happened."""
+    start, end = _parse(from_raw, "from"), _parse(to_raw, "to")
+    if start is None and end is None:
+        return None, None
+    if start is None or end is None:
+        raise HTTPException(status_code=422, detail="from and to must be given together")
+    end = min(end, datetime.utcnow())
+    if end <= start:
+        raise HTTPException(status_code=422, detail="to must be after from, and from must be in the past")
+    if end - start > timedelta(days=MAX_MARKET_RANGE_DAYS):
+        raise HTTPException(status_code=422, detail=f"a custom range is at most {MAX_MARKET_RANGE_DAYS} days")
+    return start, end
+
+
 @router.get("/intelligence/market/rankings")
 async def market_rankings(
     window_days: int = Query(7, ge=1, le=90),
+    from_: Optional[str] = Query(None, alias="from"),
+    to: Optional[str] = Query(None),
     limit: int = Query(10, ge=1, le=50),
     category: Optional[str] = Query(None, max_length=100),
+    county: Optional[str] = Query(None, max_length=100),
     admin: User = Depends(require_permission(Permission.ADMIN_SUMMARY)),
     db: AsyncSession = Depends(get_db),
 ):
-    return await market_intel.rankings(db, window_days=window_days, limit=limit, category=category)
+    start, end = _market_range(from_, to)
+    return await market_intel.rankings(db, window_days=window_days, limit=limit, category=category,
+                                       county=county, start=start, end=end)
+
+
+@router.get("/intelligence/market/demand")
+async def market_demand(
+    window_days: int = Query(30, ge=7, le=180),
+    admin: User = Depends(require_permission(Permission.ADMIN_SUMMARY)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Demand and supply by category and county against the window before."""
+    return await market_intel.demand(db, window_days=window_days)
 
 
 @router.get("/intelligence/market/listings/{listing_id}")
@@ -160,11 +196,14 @@ async def market_listing_detail(
 @router.get("/intelligence/market/performance")
 async def market_performance(
     window_days: int = Query(30, ge=1, le=90),
+    from_: Optional[str] = Query(None, alias="from"),
+    to: Optional[str] = Query(None),
     limit: int = Query(10, ge=1, le=50),
     admin: User = Depends(require_permission(Permission.ADMIN_SUMMARY)),
     db: AsyncSession = Depends(get_db),
 ):
-    return await market_intel.performance(db, window_days=window_days, limit=limit)
+    start, end = _market_range(from_, to)
+    return await market_intel.performance(db, window_days=window_days, limit=limit, start=start, end=end)
 
 
 @router.get("/intelligence/market/anomalies")

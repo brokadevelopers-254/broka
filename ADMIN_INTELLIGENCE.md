@@ -127,6 +127,74 @@ least), payment prompts unanswered after 15 minutes, active accounts down 20%
 names its evidence and where to look; none changes an account, a payment or a
 setting.
 
+## Marketplace and listing intelligence
+
+Code: `backend/api/core/market_intel.py` (rankings, conversion, attention,
+listing detail, demand, seller and buyer performance) and
+`backend/api/core/market_models.py` (anomalies, forecasts, churn, supply and
+payment models). Routes under `/admin/intelligence/market/` (ADMIN_SUMMARY).
+
+**Stages a buyer reaches on a listing**, each counted once per buyer in the
+window, with administrators and the listing's own seller left out:
+
+| Stage | Counted from |
+|---|---|
+| Viewed | `listing_views`: one row per account and listing, the first time it opened it, so repeat opens and guests are never counted |
+| Saved, liked | `wishlists`, `listing_likes` |
+| Contacted | the buyer's own chat message on the listing, or an `interests` row |
+| Negotiated | the seller wrote in the buyer's thread (the conversation went both ways), or the buyer made a price offer (`interests.offer_price`) |
+| Deal agreed | a deal on the listing created in the window and now past negotiation, not cancelled |
+| Deal completed | the escrow was released to the seller (after the buyer confirmed delivery) in the window |
+
+A negotiation is not a sale, and contact is engagement, not conversion: the
+rankings keep *popularity* (viewed, saved, liked, contacted) apart from
+*conversion* (contact-to-deal rate, deals, completions).
+
+**Score**, behind trending, growing and losing attention:
+
+    score = 1 x viewers + 2 x savers + 2 x likers + 4 x contacters
+          + 6 x negotiators + 10 x buyers who agreed a deal
+
+All counts are distinct users in the window. The weights are configurable with
+`MARKET_TRENDING_WEIGHTS` (for example `views=1,saves=2,likes=2,contacts=4,negotiations=6,deals=10`);
+an unknown stage, a negative or a non-number is ignored and logged. Every
+ranking response returns the weights in force and the formula. Completions
+are reported beside the score, not in it: a release can come weeks after the
+attention that led to it.
+
+| List | Rule |
+|---|---|
+| Trending | score at least 3 and higher than in the window of equal length before; ordered by the gain |
+| Growing | relative gain, only for listings that scored at least 5 before (a rise from almost nothing is not growth) |
+| Losing attention | scored at least 10 before, at most half of that now |
+| Popular, not converting | at least 5 viewers and at most half the median contact rate (needs 4 such listings to benchmark) |
+| Hidden gems | fewer viewers than the median, at least 2 contacts, at least twice the median contact rate |
+| Talked about, not bought | at least 3 buyers contacted and none agreed a deal |
+| Unusual interest | contacters at least 3 times the median across contacted listings (needs 4 of them), and at least 3 |
+| Needs the seller | a buyer whose conversation opened in the window has waited over 24 hours for the seller's first reply; Zeno answering does not count |
+
+Ties are broken by listing id, so the same data always gives the same order.
+Windows: the last 24 hours, 7, 30 or 90 days, or a custom range of up to 90
+days (its end is held at the present). Filters: category and county.
+
+**Listing detail** shows each stage, the deals by status, distinct users per
+day, and the nightly snapshots (`listing_metric_snapshots`, cumulative views,
+likes and interested buyers). A day the snapshot job did not run has no point;
+nothing is filled in. The county is the finest location shown.
+
+**Demand** (`/market/demand`): by category, buyer conversations + interests +
+Buying Agent requests, against live listings now, with the previous window's
+demand, new listings and deals beside it. Live supply is the state now: no
+history of which listings were live is kept, so only flows are compared. By
+county: buyer conversations on listings in that county; buyers' own locations
+are not used.
+
+**Sellers and buyers** (`/market/performance`): per seller, live listings,
+viewers, contacters (with the previous window), negotiators, deals agreed and
+completed, and the average first-reply time, measured as in the seller
+rating. Per buyer, how far they went, and a funnel of distinct buyers per
+stage. Searches are not recorded, so nothing measures search.
+
 ## Data protection
 
 These records describe how people use the app, which is personal data under
