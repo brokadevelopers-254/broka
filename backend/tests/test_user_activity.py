@@ -378,7 +378,7 @@ class TestSignedInSessions:
 class TestEngagementFigures:
     async def test_dau_wau_and_mau_count_distinct_accounts_on_their_days(self):
         day = date(2024, 3, 20)
-        a, b, c, d = (await _user() for _ in range(4))
+        a, b, c, d = [await _user() for _ in range(4)]
         await _activity_day(a.id, day)
         await _activity_day(a.id, day - timedelta(days=1))
         await _activity_day(b.id, day - timedelta(days=5))
