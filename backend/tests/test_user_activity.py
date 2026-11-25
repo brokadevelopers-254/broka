@@ -31,7 +31,10 @@ from api.security import (
 from main import app
 
 PASSWORD = "Passw0rd!x"
-T0 = datetime(2024, 3, 14, 9, 0, 0)
+# The module shares one database, so every fixed date here is kept away from
+# every other test's 30-day window: the crediting tests used to write rows on
+# a day inside the DAU/WAU/MAU test's week, and it counted them.
+T0 = datetime(2023, 6, 14, 9, 0, 0)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -432,8 +435,10 @@ class TestEngagementFigures:
         assert figures["new_active_users"] == 1
 
     async def test_retention_scores_a_matured_cohort_registered_after_tracking_began(self):
+        # Any activity before the cohort day marks tracking as begun; this
+        # day is outside every other test's window.
         pioneer = await _user()
-        await _activity_day(pioneer.id, date(2024, 3, 1))
+        await _activity_day(pioneer.id, date(2022, 1, 3))
         member = await _user(created_at=datetime(2024, 10, 1, 10, 0, 0))
         await _activity_day(member.id, date(2024, 10, 2))
 
