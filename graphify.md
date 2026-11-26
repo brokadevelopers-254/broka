@@ -53,14 +53,14 @@ Where things usually are:
 
 ## Backend endpoints
 
-434 endpoints served by `backend/main.py`. **Auth** is read from each
+436 endpoints served by `backend/main.py`. **Auth** is read from each
 handler's dependencies: `public` (none), `optional` (a token is used if sent),
 `user` (sign-in required), `admin`, `token` (WebSocket, checks its own token).
-Counts: admin 124, optional 7, public 72, token 6, user 225.
+Counts: admin 126, optional 7, public 72, token 6, user 225.
 
 | Method | Path | Auth | Handler |
 |---|---|---|---|
-| GET | `/` | public | `root` (backend/main.py:600) |
+| GET | `/` | public | `root` (backend/main.py:603) |
 | GET | `/admin/activity/engagement` | admin | `activity_engagement` (backend/api/domains/admin/activity.py:41) |
 | GET | `/admin/activity/live` | admin | `activity_live` (backend/api/domains/admin/activity.py:32) |
 | GET | `/admin/activity/retention` | admin | `activity_retention` (backend/api/domains/admin/activity.py:53) |
@@ -73,6 +73,7 @@ Counts: admin 124, optional 7, public 72, token 6, user 225.
 | POST | `/admin/alerts/{alert_id}/acknowledge` | admin | `acknowledge_alert` (backend/api/domains/admin/alerts_revenue.py:154) |
 | POST | `/admin/alerts/{alert_id}/resolve` | admin | `resolve_alert` (backend/api/domains/admin/alerts_revenue.py:167) |
 | GET | `/admin/analytics/timeseries` | admin | `admin_timeseries` (backend/api/domains/admin/alerts_revenue.py:279) |
+| POST | `/admin/assistant/ask` | admin | `ask` (backend/api/domains/admin/assistant.py:28) |
 | GET | `/admin/audit-logs` | admin | `get_audit_logs` (backend/api/domains/admin/router.py:1975) |
 | GET | `/admin/command-center` | admin | `admin_command_center` (backend/api/domains/admin/command_center.py:19) |
 | GET | `/admin/communications` | admin | `list_communications` (backend/api/domains/service_communications/router.py:603) |
@@ -131,6 +132,7 @@ Counts: admin 124, optional 7, public 72, token 6, user 225.
 | GET | `/admin/listings/{listing_id}` | admin | `admin_listing_detail` (backend/api/domains/admin/alerts_revenue.py:322) |
 | POST | `/admin/media/backfill` | admin | `run_media_backfill` (backend/api/domains/admin/router.py:2119) |
 | GET | `/admin/operations` | admin | `admin_operations` (backend/api/domains/admin/operations.py:19) |
+| GET | `/admin/operations/anomalies` | admin | `admin_operations_anomalies` (backend/api/domains/admin/operations.py:30) |
 | GET | `/admin/ops-snapshot` | admin | `ops_snapshot` (backend/api/domains/admin/router.py:376) |
 | GET | `/admin/payments` | admin | `admin_payments` (backend/api/domains/admin/router.py:1226) |
 | GET | `/admin/report-builder/catalog` | admin | `report_catalog` (backend/api/domains/admin/report_builder.py:167) |
@@ -290,7 +292,7 @@ Counts: admin 124, optional 7, public 72, token 6, user 225.
 | GET | `/feedback` | user | `list_my_feedback` (backend/api/domains/feedback/router.py:405) |
 | POST | `/feedback` | user | `submit_feedback` (backend/api/domains/feedback/router.py:374) |
 | GET | `/feedback/{feedback_id}` | user | `get_my_feedback` (backend/api/domains/feedback/router.py:433) |
-| GET | `/health` | public | `health` (backend/main.py:628) |
+| GET | `/health` | public | `health` (backend/main.py:631) |
 | GET | `/listings/` | public | `list_listings` (backend/api/domains/listings/router.py:226) |
 | POST | `/listings/` | user | `create_listing` (backend/api/domains/listings/router.py:295) |
 | GET | `/listings/reported-unavailable` | user | `reported_unavailable` (backend/api/domains/listings/router.py:210) |
@@ -320,7 +322,7 @@ Counts: admin 124, optional 7, public 72, token 6, user 225.
 | DELETE | `/listings/{listing_id}/sold-out` | user | `revoke_sold_out` (backend/api/domains/listings/router.py:1239) |
 | POST | `/listings/{listing_id}/store` | user | `set_listing_store` (backend/api/domains/listings/router.py:1191) |
 | DELETE | `/listings/{listing_id}/store` | user | `remove_listing_store` (backend/api/domains/listings/router.py:1203) |
-| GET | `/live` | public | `live` (backend/main.py:722) |
+| GET | `/live` | public | `live` (backend/main.py:725) |
 | GET | `/media/chat-files/{file_id}` | user | `download_chat_file` (backend/api/routers/media.py:771) |
 | GET | `/media/i/{key:path}` | public | `serve_image` (backend/api/domains/media/router.py:85) |
 | POST | `/media/images` | user | `upload_image` (backend/api/domains/media/router.py:52) |
@@ -408,7 +410,7 @@ Counts: admin 124, optional 7, public 72, token 6, user 225.
 | GET | `/pricing/plans` | public | `pricing_plans` (backend/api/domains/pricing/router.py:197) |
 | GET | `/pricing/safe-payment` | public | `safe_payment_info` (backend/api/domains/pricing/router.py:229) |
 | GET | `/pricing/store-plan` | public | `store_plan` (backend/api/domains/pricing/router.py:203) |
-| GET | `/ready` | public | `ready` (backend/main.py:634) |
+| GET | `/ready` | public | `ready` (backend/main.py:637) |
 | POST | `/reviews/` | user | `submit_review` (backend/api/domains/reviews/router.py:48) |
 | GET | `/reviews/my-deals` | user | `my_reviewable_deals` (backend/api/domains/reviews/router.py:82) |
 | GET | `/reviews/seller/{seller_id}` | public | `get_seller_reviews` (backend/api/domains/reviews/router.py:63) |
@@ -502,6 +504,7 @@ Counts: admin 124, optional 7, public 72, token 6, user 225.
 
 - `activity.py` — Admin reads of signed-in sessions and foreground activity (api/core/activity.py).
 - `alerts_revenue.py` — Admin additions: alerts, revenue, timeseries, detail reads.
+- `assistant.py` — POST /admin/assistant/ask: a read-only answer from the verified analytics.
 - `command_center.py` — GET /admin/command-center - the Command Center's measured figures in one read.
 - `intelligence.py` — Admin intelligence and founder reports.
 - `moderation.py` — Restrict, suspend and reinstate accounts (api/core/account_status.py).
@@ -754,6 +757,7 @@ Counts: admin 124, optional 7, public 72, token 6, user 225.
 - `after_commit.py` — Pushes and texts a sweep decides on, sent once its transaction commits.
 - `ai_cost.py` — BROKA — AI cost controls.
 - `analytics.py` — Admin analytics timeseries — cheap counts bucketed in Python.
+- `assistant.py` — The Intelligence Assistant: read-only answers from BROKA's verified analytics.
 - `auction_hub.py` — Real-time auction hub — same connect/disconnect/broadcast-by-id shape as deal_hub.py, keyed by listing_id instead of deal_id (Ch.6).
 - `auction_hub_subscribers.py` — Subscribes to BidPlaced and pushes it to every socket watching that listing_id.
 - `audit.py` — BROKA - Audit Log Records who did what, when, on which resource.
@@ -804,6 +808,7 @@ Counts: admin 124, optional 7, public 72, token 6, user 225.
 - `nudge_templates.py` — BROKA — availability-nudge SMS composition.
 - `observability.py` — BROKA v3.0 - Observability Scaffold (issue #13 / #14)
 - `operations.py` — The admin operations workspace: is BROKA working, and if not, where not.
+- `ops_anomalies.py` — Unusual changes in the operations figures, judged against their own history.
 - `ops_metrics.py` — Operational counts and loop heartbeats this process keeps between samples.
 - `ops_sampler.py` — Write this process's operations counters to `ops_samples` once a minute.
 - `permissions.py` — BROKA - Fine-Grained Permission System Moves beyond simple buyer/seller/admin roles to granular capability flags.
@@ -1005,7 +1010,7 @@ What each `backend/api/domains/<area>` imports from other domains and from
 `api/core` (imports inside functions included). Useful for the blast radius
 of a change.
 
-- **admin** — domains: escrow, listings, media; core: account_status, activity, admin_alerts, admin_reports, ai_cost, analytics, audit, client_ip, command_center, config, econfirm_client, email, event_catalog, fraud, insights, intelligence, ledger, market_intel, market_models, money, observability, operations, permissions, rate_limit, report_builder, report_pdf, revenue, timeutil, workflow; database
+- **admin** — domains: escrow, listings, media; core: account_status, activity, admin_alerts, admin_reports, ai_cost, analytics, assistant, audit, client_ip, command_center, config, econfirm_client, email, event_catalog, fraud, insights, intelligence, ledger, market_intel, market_models, money, observability, operations, ops_anomalies, permissions, rate_limit, report_builder, report_pdf, revenue, timeutil, workflow; database
 - **admin_email** — core: audit, client_ip, email, idempotency, observability, permissions, rate_limit; database
 - **ai_broker** — domains: categories, listings, pricing; core: circuit_breaker, config, cost_ledger, gemini, ml, rate_limit; database, security
 - **auction_ws** — core: auction_hub; security
@@ -1081,7 +1086,7 @@ Read by `backend/api/core/config.py`; documented in `.env.example` and
 
 ## Backend tests
 
-192 files in `backend/tests/`.
+194 files in `backend/tests/`.
 
 - `test_account_moderation.py` — Restriction, suspension and reinstatement, enforced by the backend.
 - `test_admin_additions.py` — Admin additions: SMS cost hook, timeseries, detail reads, users search.
@@ -1103,6 +1108,7 @@ Read by `backend/api/core/config.py`; documented in `.env.example` and
 - `test_announcement_lifecycle_feedback.py` — Announcement 30-day lifecycle, per-user delete, and feedback/complaints.
 - `test_answered_call_not_lost.py` — An answered call is never lost, never "missed", never keeps anyone busy (2026-10-09).
 - `test_assemblyai_token.py` — BROKA - /stt/assemblyai-token tests Run: pytest backend/tests/test_assemblyai_token.py -v
+- `test_assistant.py` — The Intelligence Assistant: each question goes to one intent, every answer says what it covers and where to check it, instructions are refu…
 - `test_auction_leaderboard.py` — GET /auction/{listing_id}/leaderboard - the list the auction screen shows.
 - `test_auction_lifecycle.py` — BROKA - Auction lifecycle tests Run: pytest backend/tests/test_auction_lifecycle.py -v
 - `test_auctions.py` — BROKA - Auction Tests Run: pytest backend/tests/test_auctions.py -v
@@ -1203,6 +1209,7 @@ Read by `backend/api/core/config.py`; documented in `.env.example` and
 - `test_offline_message_recovery.py` — Offline-to-online recovery: a message sent while a phone was away must still be announced when that phone becomes reachable again.
 - `test_one_call_at_a_time.py` — One call at a time (2026-10-08).
 - `test_online_stores_update.py` — Online-store update: excluded listing categories, '6 km from you' distances, and KES 40-a-listing-per-two-months pricing.
+- `test_ops_anomalies.py` — Operations anomalies: a flag for a real change, nothing for a normal day, and no verdict where the history or the samples are missing.
 - `test_ops_metrics.py` — Operations counters: what each process counts between samples.
 - `test_otp_sms_retriever.py` — Covers the OTP SMS body built for Android's SMS Retriever API.
 - `test_password_hashing.py` — Password hashing: what bcrypt is given, and what it costs the event loop.
