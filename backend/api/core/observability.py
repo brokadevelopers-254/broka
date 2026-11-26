@@ -20,7 +20,7 @@ import re
 import time
 import uuid
 from contextvars import ContextVar
-from typing import Callable
+from typing import Callable, Optional
 
 from fastapi import FastAPI, Request, Response
 from fastapi.routing import APIRoute
@@ -135,6 +135,19 @@ class RequestIdMiddleware:
 DB_REQUEST_QUERY_WARN = max(1, int(os.getenv("DB_REQUEST_QUERY_WARN", "60")))
 
 
+def _route_name(scope) -> Optional[str]:
+    """"GET /listings/{listing_id}": the route template the router matched
+    (FastAPI puts it in the scope), never the path with its ids. None for a
+    path no route matched."""
+    try:
+        template = getattr(scope.get("route"), "path", None)
+        if not template:
+            return None
+        return f"{scope.get('method', '?')} {template}"
+    except Exception:
+        return None
+
+
 class LatencyLogMiddleware:
     """Logs method, path, status, duration and database work for every request.
 
@@ -174,12 +187,12 @@ class LatencyLogMiddleware:
         except BaseException:
             # The app's generic 500 handler runs outside this middleware, so
             # a request that raised is counted here or not at all.
-            request_metrics.record(500, (time.perf_counter() - start) * 1000)
+            request_metrics.record(500, (time.perf_counter() - start) * 1000, _route_name(scope))
             raise
         finally:
             self._end_db_stats(db_token)
         elapsed_ms = (time.perf_counter() - start) * 1000
-        request_metrics.record(status[0], elapsed_ms)
+        request_metrics.record(status[0], elapsed_ms, _route_name(scope))
 
         method = scope.get("method", "?")
         path   = safe_log_path(scope.get("path", "/"))

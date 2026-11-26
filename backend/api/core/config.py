@@ -847,6 +847,22 @@ class Settings:
     platform_fixed_monthly_cost_kes: int = field(default_factory=lambda: max(0, int(
         os.getenv("PLATFORM_FIXED_MONTHLY_COST_KES", "773") or 0)))
 
+    # ── Operations samples (api/core/ops_sampler.py) ─────────────────────────
+    # Every API process writes its request, database, push and background-task
+    # counters to ops_samples this often; the operations workspace and the
+    # reports read them. Kept OPS_SAMPLE_RETENTION_DAYS, then deleted.
+    ops_sample_seconds: int = field(default_factory=lambda: max(15, int(
+        os.getenv("OPS_SAMPLE_SECONDS", "60") or 60)))
+    ops_sample_retention_days: int = field(default_factory=lambda: max(1, int(
+        os.getenv("OPS_SAMPLE_RETENTION_DAYS", "14") or 14)))
+
+    # ── Report builder (api/core/report_builder.py) ──────────────────────────
+    # The admin dashboard's address, for the link in a scheduled report's
+    # email ("https://admin.broka.co.ke"). Empty: the email has no link.
+    admin_dashboard_url: str = field(default_factory=lambda: os.getenv(
+        "ADMIN_DASHBOARD_URL", ""
+    ).strip().rstrip("/"))
+
     # ── Fraud thresholds ──────────────────────────────────────────────────────
     fraud_new_account_days: int = 7
     fraud_rapid_tx_window_hours: int = 24

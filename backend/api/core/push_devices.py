@@ -30,6 +30,7 @@ from typing import Awaitable, Callable, Optional
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.core import ops_metrics
 from api.database import AsyncSessionLocal, User
 from api.models.push_device import PushDevice
 
@@ -249,6 +250,7 @@ async def forget(token: str, reason: str = "unregistered") -> None:
             await db.commit()
         logger.info("[push] dead device token forgotten token=%s reason=%s",
                     token_fingerprint(token), reason)
+        ops_metrics.push_token_removed()
     except Exception as exc:
         logger.warning("[push] could not forget a dead token token=%s: %s",
                        token_fingerprint(token), type(exc).__name__)
@@ -354,6 +356,7 @@ async def push_user(
     if not tokens:
         logger.info("[push] PUSH_NO_DEVICES user=%s route=%s room=%s",
                     user_id, route, room)
+        ops_metrics.push_no_devices()
         if outcome is not None:
             # Not retried: a phone that registers later is told about what
             # is unread then (message_push.push_unread_for_user), and the
@@ -388,18 +391,24 @@ async def push_user(
     finally:
         current_push_user.reset(marker)
     sent = 0
+    # FCM's codes for the phones that did not accept, for the operations
+    # counts (api/core/ops_metrics.py): codes only, never a token.
+    failures: list[str] = []
     for token, result in zip(tokens, results):
         if isinstance(result, BaseException):
             logger.warning("[push] send raised for user=%s token=%s type=%s",
                            user_id, token_fingerprint(token), type(result).__name__)
+            failures.append("SEND_EXCEPTION")
             if outcome is not None:
                 outcome._failed("SEND_EXCEPTION", True)
             continue
         if result:
             sent += 1
             continue
+        code, retryable = _failure_code(result)
+        failures.append(code)
         if outcome is not None:
-            outcome._failed(*_failure_code(result))
+            outcome._failed(code, retryable)
         if getattr(result, "unregistered", False):
             # Only a dead registration reaches here: a sender/project
             # mismatch or a transient provider failure must leave the token
@@ -408,6 +417,7 @@ async def push_user(
             await forget(token, reason="fcm_unregistered")
     if outcome is not None:
         outcome.accepted = sent
+    ops_metrics.push_result(route, devices=len(tokens), accepted=sent, failures=failures)
     log = logger.info if route in ("incoming_call", "missed_call") else logger.debug
     log("[push] PUSH_RESULT user=%s route=%s room=%s tokens=%d accepted=%d",
         user_id, route, room, len(tokens), sent)

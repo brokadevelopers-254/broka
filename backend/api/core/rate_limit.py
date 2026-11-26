@@ -354,3 +354,9 @@ store_enquiry_ip_limiter = _make_limiter(
 # what sign-up needs. 30 an hour is far past a person answering mail.
 admin_email_send_limiter = _make_limiter(
     "admin_email_send", limit=1000 if _settings.is_test else 30, window_seconds=3600)
+# Report builder previews and runs (api/domains/admin/report_builder.py),
+# keyed by the signed-in administrator. One build reads dozens of aggregates;
+# 60 an hour is far past someone building reports by hand and stops a stuck
+# client from tying up the database.
+report_builder_limiter = _make_limiter(
+    "report_builder", limit=1000 if _settings.is_test else 60, window_seconds=3600)

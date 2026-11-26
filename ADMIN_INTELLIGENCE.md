@@ -195,6 +195,87 @@ completed, and the average first-reply time, measured as in the seller
 rating. Per buyer, how far they went, and a funnel of distinct buyers per
 stage. Searches are not recorded, so nothing measures search.
 
+## Operations
+
+`GET /admin/operations?window_hours=1..336` (`api/core/operations.py`,
+`ADMIN_SUMMARY`) answers whether BROKA is working, and where not, for the
+window against the one before.
+
+**Samples.** Every API process writes one `ops_samples` row a minute
+(`api/core/ops_sampler.py`), with no lease, because each process only knows
+what it answered and ran. A row holds whole minutes: requests, 4xx and 5xx,
+a latency histogram (edges in `request_metrics.LATENCY_BOUNDS_MS`), the 25
+busiest route templates, database statement and pool counters, push results,
+queued-job counts, and each background loop's last pass. The counters live in
+`api/core/ops_metrics.py` between samples; a row that cannot be saved puts
+them back. Rows are deleted after `OPS_SAMPLE_RETENTION_DAYS` (14).
+
+- Latency percentiles over a window are estimated from the histograms added
+  together, never averaged from per-minute percentiles. Streams (`/stream`)
+  are counted but not timed.
+- Endpoints are route templates (`GET /listings/{listing_id}`). A path with
+  its ids is never stored.
+- Pool use is checked out over the pool's maximum at the moment of each sample;
+  saturations count every time the pool filled.
+- A background loop is stale when it has not finished a pass for three of its
+  intervals. Every task of the five-minute sweep counts its own failure.
+- Before the first sample, every figure built on samples is unavailable with
+  the reason, never zero.
+
+**From rows, for any window:** payments by provider and status (M-Pesa
+intents and ZetuPay) with the success rate, attempts pending over 15 minutes,
+ZetuPay's webhook delay and the failure reasons (digits masked); chat message
+delivery (`message_deliveries`); call outcomes from the call cards.
+
+**Not measured, and said so:** call connection delay, M-Pesa callback delay
+(no callback time is stored), device receipt for any push but a chat message,
+a waiting-connections gauge, and uptime, which needs an outside monitor. FCM
+accepting a push is never shown as delivery.
+
+## Report builder
+
+`/admin/report-builder` (`api/core/report_builder.py`, `api/models/report_builder.py`).
+The daily, weekly and monthly founder briefs (`admin_reports.py`) are separate
+and unchanged.
+
+**A spec** chooses categories (platform growth, user engagement, marketplace,
+listing performance, seller performance, revenue and payments, fraud and
+moderation, system health, and an overall preset) or single metrics, a range
+of whole UTC days (fixed dates or the last N days, at most 366), a comparison
+(the period before, a year earlier, or none), category and county filters, a
+grouping (by day, 7 days, month, category or county) and a visualization.
+
+**Figures** come from the module that already defines each one, so a report
+cannot disagree with the page the figure comes from. A figure that cannot be
+measured for the period (activity before tracking began, system health before
+sampling began, delivery older than its retention) is unavailable with the
+reason and left out of the summary, the changes and the observations.
+Point-in-time figures are as of generation and never compared. Filters apply
+to listing performance and the category and county breakdowns only.
+
+**A report** holds an executive summary, the figures with their comparison,
+charts for grouped figures (a day nobody measured is a gap, never a zero),
+supporting tables, the important changes (20% or more on a base of 10, or 5
+points for a rate), the days that stood out against the same weekday
+(`market_models.evaluate`, at most the last 92 days), observations that each
+name the figure and source behind them, and every figure's definition and
+source.
+
+**Runs** are stored with the spec they were built from. Regenerating writes a
+new run that points at the old one, which stays. A run downloads as a PDF
+(`api/core/report_pdf.py`, ReportLab: A4, numbered pages, charts) and, in the
+dashboard, as CSV, both from the stored payload. Every generation,
+regeneration and change to a saved report writes an audit row.
+
+**Schedules.** A saved report can run daily, weekly, monthly or every N days
+at an hour (UTC). The five-minute sweep runs what is due, once: a run missed
+while the service was down is made once, not once per missed slot, and a
+failed build is stored as a failed run and raises an admin alert. Reports go
+by email only to administrators with an address, chosen by id, and only with
+`SEND_ADMIN_EMAIL`: a plain-text summary of the figures, with a link when
+`ADMIN_DASHBOARD_URL` is set. No attachment, no personal data. Scheduled runs
+follow `ADMIN_REPORTS_ENABLED` with the founder briefs.
+
 ## Data protection
 
 These records describe how people use the app, which is personal data under

@@ -535,6 +535,33 @@ async def listing_detail(
     }
 
 
+async def stage_totals(
+    db: AsyncSession, start: datetime, end: datetime, *, category: Optional[str] = None,
+    county: Optional[str] = None, group_by: Optional[str] = None,
+) -> dict:
+    """Each stage's distinct buyers summed over the listings engaged in
+    [start, end): a buyer who viewed three listings counts three times, as
+    three listings were each seen by one buyer. With `group_by` ("category"
+    or "county") the same per group. For the report builder, which needs
+    totals where rankings keep only the top listings."""
+    eng, cut = await engagement(db, start, end)
+    meta = await _listing_meta(db, _ids(eng))
+    tallies = _tally(eng, meta, category, county)
+    totals = {s: 0 for s in SIGNALS}
+    groups: dict[str, dict[str, int]] = {}
+    for lid, sets in tallies.items():
+        counts = {s: len(sets[s]) for s in SIGNALS}
+        for s in SIGNALS:
+            totals[s] += counts[s]
+        if group_by in ("category", "county"):
+            label = (meta[lid][group_by] or "").strip() or ("Uncategorised" if group_by == "category" else "Unknown")
+            entry = groups.setdefault(label, {"listings": 0, **{s: 0 for s in SIGNALS}})
+            entry["listings"] += 1
+            for s in SIGNALS:
+                entry[s] += counts[s]
+    return {"listings_engaged": len(tallies), "totals": totals, "groups": groups, "truncated": cut}
+
+
 async def first_reply_minutes(db: AsyncSession, start: datetime, end: datetime) -> tuple[dict[str, float], bool]:
     """Average minutes to the seller's first reply per seller, for threads opened
     in [start, end): the rule the seller rating uses (domains/trust/response_time),
