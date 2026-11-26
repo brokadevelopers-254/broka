@@ -253,6 +253,17 @@ else:
     service_communication_publish_limiter = _make_limiter(
         "service_communication_publish", limit=10, window_seconds=60,
     )
+# Administrative Zeno (Jarvis Mode). Its own bucket, keyed by the signed-in
+# administrator: a dashboard investigation and a customer's Zeno chat are
+# different workloads and must not share an allowance. Each turn can make two
+# model calls and up to four bounded tool queries, so the ceiling is lower
+# than a plain chat limiter. Widened under test so suites are not defeated by
+# the limiter (its behaviour is tested directly in test_admin_zeno.py).
+admin_zeno_limiter = _make_limiter(
+    "admin_zeno",
+    limit=1000 if _settings.is_test else _settings.admin_zeno_rate_limit_per_minute,
+    window_seconds=60,
+)
 offer_limiter    = _make_limiter("offer",    limit=10, window_seconds=60)
 dispute_limiter  = _make_limiter("dispute",  limit=3,  window_seconds=3600)
 stk_limiter      = _make_limiter("stk_push", limit=3,  window_seconds=60)

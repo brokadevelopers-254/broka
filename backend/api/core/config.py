@@ -151,6 +151,20 @@ class Settings:
         "AI_COVERS_ENABLED", "false"
     ).strip().lower() in ("1", "true", "yes", "on"))
 
+    # ── Administrative Zeno (Jarvis Mode) ────────────────────────────────────
+    # An administrative, read-only intelligence capability. Off in production
+    # until deliberately switched on; on in development/test so the domain is
+    # exercised. Disabled, every /admin/zeno route answers a controlled
+    # ADMIN_ZENO_DISABLED and the rest of the admin API is unaffected.
+    admin_zeno_enabled: bool = field(
+        default_factory=lambda: _on_unless_production("ADMIN_ZENO_ENABLED")
+    )
+    # Per-administrator turns per minute. Its own bucket, never shared with a
+    # customer-facing Zeno limit.
+    admin_zeno_rate_limit_per_minute: int = field(
+        default_factory=lambda: int(os.getenv("ADMIN_ZENO_RATE_LIMIT_PER_MINUTE", "10"))
+    )
+
     # ── M-Pesa ────────────────────────────────────────────────────────────────
     mpesa_env: str = field(default_factory=lambda: os.getenv("MPESA_ENV", "sandbox"))
     mpesa_consumer_key: str = field(default_factory=lambda: os.getenv("MPESA_CONSUMER_KEY", ""))

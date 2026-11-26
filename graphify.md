@@ -53,14 +53,14 @@ Where things usually are:
 
 ## Backend endpoints
 
-436 endpoints served by `backend/main.py`. **Auth** is read from each
+442 endpoints served by `backend/main.py`. **Auth** is read from each
 handler's dependencies: `public` (none), `optional` (a token is used if sent),
 `user` (sign-in required), `admin`, `token` (WebSocket, checks its own token).
-Counts: admin 126, optional 7, public 72, token 6, user 225.
+Counts: admin 132, optional 7, public 72, token 6, user 225.
 
 | Method | Path | Auth | Handler |
 |---|---|---|---|
-| GET | `/` | public | `root` (backend/main.py:603) |
+| GET | `/` | public | `root` (backend/main.py:608) |
 | GET | `/admin/activity/engagement` | admin | `activity_engagement` (backend/api/domains/admin/activity.py:41) |
 | GET | `/admin/activity/live` | admin | `activity_live` (backend/api/domains/admin/activity.py:32) |
 | GET | `/admin/activity/retention` | admin | `activity_retention` (backend/api/domains/admin/activity.py:53) |
@@ -185,6 +185,12 @@ Counts: admin 126, optional 7, public 72, token 6, user 225.
 | POST | `/admin/users/{user_id}/unflag` | admin | `unflag_user` (backend/api/domains/admin/router.py:1839) |
 | GET | `/admin/workflow-versions` | admin | `get_workflow_versions` (backend/api/domains/admin/router.py:2066) |
 | GET | `/admin/zeno/activity` | admin | `zeno_activity` (backend/api/domains/admin/router.py:1663) |
+| GET | `/admin/zeno/briefing` | admin | `zeno_briefing` (backend/api/domains/admin_zeno/router.py:98) |
+| POST | `/admin/zeno/chat` | admin | `zeno_chat` (backend/api/domains/admin_zeno/router.py:109) |
+| GET | `/admin/zeno/conversations` | admin | `list_conversations` (backend/api/domains/admin_zeno/router.py:149) |
+| GET | `/admin/zeno/conversations/{conversation_id}` | admin | `get_conversation` (backend/api/domains/admin_zeno/router.py:169) |
+| DELETE | `/admin/zeno/conversations/{conversation_id}` | admin | `delete_conversation` (backend/api/domains/admin_zeno/router.py:220) |
+| GET | `/admin/zeno/status` | admin | `zeno_status` (backend/api/domains/admin_zeno/router.py:78) |
 | WS | `/auction-ws/ws/{listing_id}` | token | `auction_ws` (backend/api/domains/auction_ws/router.py:15) |
 | POST | `/auction/bid` | user | `place_bid` (backend/api/routers/auction.py:51) |
 | GET | `/auction/{listing_id}/leaderboard` | public | `get_leaderboard` (backend/api/routers/auction.py:114) |
@@ -292,7 +298,7 @@ Counts: admin 126, optional 7, public 72, token 6, user 225.
 | GET | `/feedback` | user | `list_my_feedback` (backend/api/domains/feedback/router.py:405) |
 | POST | `/feedback` | user | `submit_feedback` (backend/api/domains/feedback/router.py:374) |
 | GET | `/feedback/{feedback_id}` | user | `get_my_feedback` (backend/api/domains/feedback/router.py:433) |
-| GET | `/health` | public | `health` (backend/main.py:631) |
+| GET | `/health` | public | `health` (backend/main.py:636) |
 | GET | `/listings/` | public | `list_listings` (backend/api/domains/listings/router.py:226) |
 | POST | `/listings/` | user | `create_listing` (backend/api/domains/listings/router.py:295) |
 | GET | `/listings/reported-unavailable` | user | `reported_unavailable` (backend/api/domains/listings/router.py:210) |
@@ -322,7 +328,7 @@ Counts: admin 126, optional 7, public 72, token 6, user 225.
 | DELETE | `/listings/{listing_id}/sold-out` | user | `revoke_sold_out` (backend/api/domains/listings/router.py:1239) |
 | POST | `/listings/{listing_id}/store` | user | `set_listing_store` (backend/api/domains/listings/router.py:1191) |
 | DELETE | `/listings/{listing_id}/store` | user | `remove_listing_store` (backend/api/domains/listings/router.py:1203) |
-| GET | `/live` | public | `live` (backend/main.py:725) |
+| GET | `/live` | public | `live` (backend/main.py:730) |
 | GET | `/media/chat-files/{file_id}` | user | `download_chat_file` (backend/api/routers/media.py:771) |
 | GET | `/media/i/{key:path}` | public | `serve_image` (backend/api/domains/media/router.py:85) |
 | POST | `/media/images` | user | `upload_image` (backend/api/domains/media/router.py:52) |
@@ -410,7 +416,7 @@ Counts: admin 126, optional 7, public 72, token 6, user 225.
 | GET | `/pricing/plans` | public | `pricing_plans` (backend/api/domains/pricing/router.py:197) |
 | GET | `/pricing/safe-payment` | public | `safe_payment_info` (backend/api/domains/pricing/router.py:229) |
 | GET | `/pricing/store-plan` | public | `store_plan` (backend/api/domains/pricing/router.py:203) |
-| GET | `/ready` | public | `ready` (backend/main.py:637) |
+| GET | `/ready` | public | `ready` (backend/main.py:642) |
 | POST | `/reviews/` | user | `submit_review` (backend/api/domains/reviews/router.py:48) |
 | GET | `/reviews/my-deals` | user | `my_reviewable_deals` (backend/api/domains/reviews/router.py:82) |
 | GET | `/reviews/seller/{seller_id}` | public | `get_seller_reviews` (backend/api/domains/reviews/router.py:63) |
@@ -516,6 +522,21 @@ Counts: admin 126, optional 7, public 72, token 6, user 225.
 
 - `__init__.py` — Admin Email Reply: one message to one address, from BROKA's admin address.
 - `router.py` — POST /admin/email/send: the admin dashboard's Email Reply tool.
+
+### `backend/api/domains/admin_zeno/`
+
+- `__init__.py` — Administrative Zeno - Jarvis Mode (Phase 1).
+- `briefing_service.py` — The initial intelligence briefing.
+- `constants.py` — Central execution limits for administrative Zeno.
+- `conversation_service.py` — Administrator-owned Jarvis conversation persistence.
+- `evidence.py` — Evidence construction, inspection and validation.
+- `model_gateway.py` — The administrative model adapter.
+- `models.py` — Persistence for administrator-owned Jarvis conversations.
+- `orchestrator.py` — The Jarvis orchestration engine.
+- `prompts.py` — Administrative system prompts and prompt builders.
+- `router.py` — The /admin/zeno API.
+- `schemas.py` — Typed contracts for administrative Zeno.
+- `tool_registry.py` — The closed registry of approved, read-only intelligence tools.
 
 ### `backend/api/domains/ai_broker/`
 
@@ -1012,6 +1033,7 @@ of a change.
 
 - **admin** — domains: escrow, listings, media; core: account_status, activity, admin_alerts, admin_reports, ai_cost, analytics, assistant, audit, client_ip, command_center, config, econfirm_client, email, event_catalog, fraud, insights, intelligence, ledger, market_intel, market_models, money, observability, operations, ops_anomalies, permissions, rate_limit, report_builder, report_pdf, revenue, timeutil, workflow; database
 - **admin_email** — core: audit, client_ip, email, idempotency, observability, permissions, rate_limit; database
+- **admin_zeno** — core: activity, admin_alerts, circuit_breaker, command_center, config, cost_ledger, gemini, insights, intelligence, market_intel, market_models, operations, ops_anomalies, permissions, rate_limit, revenue; database
 - **ai_broker** — domains: categories, listings, pricing; core: circuit_breaker, config, cost_ledger, gemini, ml, rate_limit; database, security
 - **auction_ws** — core: auction_hub; security
 - **auctions** — domains: escrow; core: audit, config, event_catalog, events, money, reconciliation, timeutil; database, security
@@ -1049,44 +1071,45 @@ of a change.
 `task_*` functions in `backend/api/core/workers.py`: the in-process sweep
 (every 5 minutes) and ARQ workers.
 
-- `task_ai_summary` (backend/api/core/workers.py:2573)
-- `task_backfill_media` (backend/api/core/workers.py:655) — Convert a bounded batch of base64 images into image assets.
-- `task_check_call_expiry` (backend/api/core/workers.py:962) — Backstop cleanup for stale call sessions (api/core/call_state.py).
-- `task_check_deal_timers` (backend/api/core/workers.py:977) — Periodic sweep (see start_periodic_sweep): fires AI-announced auto-resolution timers once their deadline passes, IF the awaited party never…
-- `task_check_dispute_timers` (backend/api/core/workers.py:2204) — Sweep for DisputeTimer objects whose fires_at has passed.
-- `task_check_interest_nudges` (backend/api/core/workers.py:1558) — Periodic sweep (see start_periodic_sweep): if a buyer expressed interest in a listing and the seller hasn't replied within ~5 minutes, send…
-- `task_close_due_auctions` (backend/api/core/workers.py:2751) — Close auctions whose ends_at has passed, and hand winners to Deal.
-- `task_collect_abandoned_media` (backend/api/core/workers.py:664) — Remove uploads no listing, store or profile ever used, a week after they were made.
-- `task_expire_buy_agent_watches` (backend/api/core/workers.py:672) — End Zeno watches older than BUY_AGENT_WATCH_DAYS and tell their buyers.
-- `task_expire_featured_listings` (backend/api/core/workers.py:944)
-- `task_fraud_sweep` (backend/api/core/workers.py:2589)
-- `task_lapse_unpaid_auction_wins` (backend/api/core/workers.py:2927) — Release listings whose winner never paid.
-- `task_notify_auctions_ending_soon` (backend/api/core/workers.py:2845) — One reminder per auction, to everyone who has bid on it.
-- `task_notify_expiry_alerts` (backend/api/core/workers.py:554) — Text sellers 2 days before a listing/store goes offline (pricing/expiry_alerts.py).
-- `task_process_service_communications` (backend/api/core/workers.py:919) — One bounded scheduler/delivery pass.
-- `task_recompute_dcr_and_leaks` (backend/api/core/workers.py:1984) — Volume 2 §3.7: nightly leak-flagging + DCR/rank_score recompute.
-- `task_recompute_trust_score` (backend/api/core/workers.py:881)
-- `task_reconcile_econfirm_escrows` (backend/api/core/workers.py:597) — Periodic sweep (Phase 8 of the E-Confirm integration): E-Confirm's callbacks aren't exposed to BROKA (per the integration spec), so this is…
-- `task_reconcile_mpesa` (backend/api/core/workers.py:2609) — Settle pending STK prompts from provider evidence, never from age.
-- `task_reconcile_zetupay_payments` (backend/api/core/workers.py:640) — Ask ZetuPay about BROKA's own charges (listing fees, plans, boosts, badges) whose webhook never came - a lost delivery, or a prompt that ti…
-- `task_refresh_dispute_summary_cache` (backend/api/core/workers.py:2191) — Keeps the platform-wide dispute-resolution summary (Volume 2 §2.3) warm.
-- `task_refresh_store_ratings` (backend/api/core/workers.py:1950) — Recompute every store's rating, and write today's snapshot.
-- `task_retrain_ml_models` (backend/api/core/workers.py:1908) — Volume 2 §4.3's weekly retrain job, plus §4.4's "start logging collecting features from day one" (feature_extraction's queries run regardle…
-- `task_send_email_notification` (backend/api/core/workers.py:2568)
-- `task_send_fcm_notification` (backend/api/core/workers.py:926)
-- `task_store_order_sweep` (backend/api/core/workers.py:581) — Expire store orders whose store did not answer, or whose buyer did not confirm, in time - giving back any stock they reserved - and send th…
-- `task_sync_listing_stock` (backend/api/core/workers.py:565) — Show again a listing whose deals were refunded or cancelled, and mark one sold once every unit has been paid out (listings/stock.py).
+- `task_ai_summary` (backend/api/core/workers.py:2597)
+- `task_backfill_media` (backend/api/core/workers.py:679) — Convert a bounded batch of base64 images into image assets.
+- `task_check_call_expiry` (backend/api/core/workers.py:986) — Backstop cleanup for stale call sessions (api/core/call_state.py).
+- `task_check_deal_timers` (backend/api/core/workers.py:1001) — Periodic sweep (see start_periodic_sweep): fires AI-announced auto-resolution timers once their deadline passes, IF the awaited party never…
+- `task_check_dispute_timers` (backend/api/core/workers.py:2228) — Sweep for DisputeTimer objects whose fires_at has passed.
+- `task_check_interest_nudges` (backend/api/core/workers.py:1582) — Periodic sweep (see start_periodic_sweep): if a buyer expressed interest in a listing and the seller hasn't replied within ~5 minutes, send…
+- `task_cleanup_admin_zeno_conversations` (backend/api/core/workers.py:660) — Delete administrative Zeno conversations past their 30-day retention.
+- `task_close_due_auctions` (backend/api/core/workers.py:2775) — Close auctions whose ends_at has passed, and hand winners to Deal.
+- `task_collect_abandoned_media` (backend/api/core/workers.py:688) — Remove uploads no listing, store or profile ever used, a week after they were made.
+- `task_expire_buy_agent_watches` (backend/api/core/workers.py:696) — End Zeno watches older than BUY_AGENT_WATCH_DAYS and tell their buyers.
+- `task_expire_featured_listings` (backend/api/core/workers.py:968)
+- `task_fraud_sweep` (backend/api/core/workers.py:2613)
+- `task_lapse_unpaid_auction_wins` (backend/api/core/workers.py:2951) — Release listings whose winner never paid.
+- `task_notify_auctions_ending_soon` (backend/api/core/workers.py:2869) — One reminder per auction, to everyone who has bid on it.
+- `task_notify_expiry_alerts` (backend/api/core/workers.py:559) — Text sellers 2 days before a listing/store goes offline (pricing/expiry_alerts.py).
+- `task_process_service_communications` (backend/api/core/workers.py:943) — One bounded scheduler/delivery pass.
+- `task_recompute_dcr_and_leaks` (backend/api/core/workers.py:2008) — Volume 2 §3.7: nightly leak-flagging + DCR/rank_score recompute.
+- `task_recompute_trust_score` (backend/api/core/workers.py:905)
+- `task_reconcile_econfirm_escrows` (backend/api/core/workers.py:602) — Periodic sweep (Phase 8 of the E-Confirm integration): E-Confirm's callbacks aren't exposed to BROKA (per the integration spec), so this is…
+- `task_reconcile_mpesa` (backend/api/core/workers.py:2633) — Settle pending STK prompts from provider evidence, never from age.
+- `task_reconcile_zetupay_payments` (backend/api/core/workers.py:645) — Ask ZetuPay about BROKA's own charges (listing fees, plans, boosts, badges) whose webhook never came - a lost delivery, or a prompt that ti…
+- `task_refresh_dispute_summary_cache` (backend/api/core/workers.py:2215) — Keeps the platform-wide dispute-resolution summary (Volume 2 §2.3) warm.
+- `task_refresh_store_ratings` (backend/api/core/workers.py:1974) — Recompute every store's rating, and write today's snapshot.
+- `task_retrain_ml_models` (backend/api/core/workers.py:1932) — Volume 2 §4.3's weekly retrain job, plus §4.4's "start logging collecting features from day one" (feature_extraction's queries run regardle…
+- `task_send_email_notification` (backend/api/core/workers.py:2592)
+- `task_send_fcm_notification` (backend/api/core/workers.py:950)
+- `task_store_order_sweep` (backend/api/core/workers.py:586) — Expire store orders whose store did not answer, or whose buyer did not confirm, in time - giving back any stock they reserved - and send th…
+- `task_sync_listing_stock` (backend/api/core/workers.py:570) — Show again a listing whose deals were refunded or cancelled, and mark one sold once every unit has been paid out (listings/stock.py).
 
 ## Configuration (environment variables)
 
 Read by `backend/api/core/config.py`; documented in `.env.example` and
 `render.yaml`. The web storefront's are in `web/.env.example`.
 
-`ACCESS_TOKEN_EXPIRE_MINUTES`, `ACTIVITY_DAY_RETENTION_DAYS`, `ACTIVITY_SAMPLE_RETENTION_DAYS`, `ACTIVITY_SESSION_RETENTION_DAYS`, `ADMIN_BOOTSTRAP_EMAIL`, `ADMIN_DASHBOARD_URL`, `ADMIN_REPORTS_ENABLED`, `AI_COVERS_ENABLED`, `AI_DEEPSEEK_INPUT_PER_1M_USD`, `AI_DEEPSEEK_OUTPUT_PER_1M_USD`, `AI_FREE_PROVIDERS`, `AI_USD_TO_KES`, `ALLOWED_ORIGINS`, `AT_API_KEY`, `AT_SENDER_ID`, `AT_USERNAME`, `AUCTIONS_ENABLED`, `AUCTION_DEFAULT_DURATION_HOURS`, `AUCTION_DEFAULT_MIN_INCREMENT`, `AUCTION_ENDING_SOON_MINUTES`, `AUCTION_FUNDING_SETTLE_MINUTES`, `AUCTION_PAYMENT_DEADLINE_HOURS`, `BROKA_ADMIN_EMAIL_FROM`, `BROKA_NATIVE`, `BUY_AGENT_MAX_ACTIVE`, `BUY_AGENT_WATCH_DAYS`, `CALL_RINGING_PRECONNECT`, `CALL_TOKEN_EXPIRE_MINUTES`, `CLIENT_IP_HEADER`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_TURN_API_TOKEN`, `CLOUDFLARE_TURN_KEY_ID`, `DATABASE_URL`, `DCR_ENABLED`, `DEBUG`, `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_TIMEOUT_SECONDS`, `ECONFIRM_API_KEY`, `ECONFIRM_BASE_URL`, `ECONFIRM_FALLBACK_EMAIL_DOMAIN`, `ECONFIRM_MAX_POLL_SECONDS`, `ECONFIRM_POLL_INTERVAL_SECONDS`, `ECONFIRM_TIMEOUT_SECONDS`, `ENV`, `ENVIRONMENT`, `ESCROW_GUIDANCE_ENABLED`, `ESCROW_PRICING_MAX_AGE_DAYS`, `ESCROW_PROVIDER_DOMAINS`, `ESCROW_RECORD_MAX_AGE_DAYS`, `EXPIRY_SMS_DAYS_BEFORE`, `EXPIRY_SMS_ENABLED`, `FOUNDING_DISCOUNT_DAYS`, `FOUNDING_SELLER_TIERS`, `FREE_LISTINGS_PER_SELLER`, `FREE_LISTING_OFFER_DAYS`, `FREE_LISTING_OFFER_LIMIT`, `FREE_STORE_OFFER_DAYS`, `FREE_STORE_OFFER_LIMIT`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `GROQ_API_KEY`, `HF_SHOWCASE_MODEL`, `HF_TOKEN`, `IN_APP_PAYMENTS_ENABLED`, `LISTING_FEES_ENABLED`, `MARKET_TRENDING_WEIGHTS`, `MAX_REQUEST_BODY_MB`, `MEDIA_PUBLIC_BASE_URL`, `MOBITECH_API_KEY`, `MOBITECH_BASE_URL`, `MOBITECH_SENDER_NAME`, `MOBITECH_SEND_ENDPOINT`, `MPESA_B2C_CREDENTIAL`, `MPESA_B2C_INITIATOR`, `MPESA_B2C_RESULT_URL`, `MPESA_B2C_TIMEOUT_URL`, `MPESA_CALLBACK_SECRET`, `MPESA_CALLBACK_URL`, `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET`, `MPESA_ENV`, `MPESA_FEATURED_CALLBACK_URL`, `MPESA_LISTING_FEE_CALLBACK_URL`, `MPESA_PASSKEY`, `MPESA_PREMIUM_CALLBACK_URL`, `MPESA_SHORTCODE`, `MPESA_STORE_CALLBACK_URL`, `MPESA_VERIFY_CALLBACK_URL`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `OPS_SAMPLE_RETENTION_DAYS`, `OPS_SAMPLE_SECONDS`, `OTP_EXPIRY_SECONDS`, `OTP_LENGTH`, `OTP_MAX_ATTEMPTS`, `PHONE_VERIFY_TOKEN_EXPIRE_MINUTES`, `PLATFORM_FIXED_MONTHLY_COST_KES`, `PREMIUM_ENABLED`, `PUBLIC_API_BASE_URL`, `R2_ACCESS_KEY_ID`, `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_SECRET_ACCESS_KEY`, `REDIS_URL`, `REFRESH_TOKEN_EXPIRE_DAYS`, `RENDER`, `REPORT_TZ_OFFSET_HOURS`, `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `SECRET_KEY`, `SENTRY_DSN`, `SERVICE_COMMUNICATION_ANNOUNCEMENT_TTL_DAYS`, `SERVICE_COMMUNICATION_CLAIM_SECONDS`, `SERVICE_COMMUNICATION_COMMUNICATION_BATCH`, `SERVICE_COMMUNICATION_MAX_ATTEMPTS`, `SERVICE_COMMUNICATION_MAX_AUDIENCE`, `SERVICE_COMMUNICATION_MAX_EXPLICIT_RECIPIENTS`, `SERVICE_COMMUNICATION_PROVIDER_CONCURRENCY`, `SERVICE_COMMUNICATION_PROVIDER_TIMEOUT_SECONDS`, `SERVICE_COMMUNICATION_RECIPIENT_BATCH`, `SERVICE_COMMUNICATION_RETENTION_DAYS`, `SERVICE_COMMUNICATION_RETRY_BASE_SECONDS`, `SERVICE_COMMUNICATION_RETRY_MAX_SECONDS`, `SERVICE_COMMUNICATION_SWEEP_SECONDS`, `SERVICE_USAGE_ENABLED`, `SERVICE_USAGE_RETENTION_DAYS`, `SMS_COST_MINOR_AT`, `SMS_COST_MINOR_MOBITECH`, `SMS_COST_MINOR_TEXIN`, `STOREFRONT_API_KEY`, `STORE_BILLING_ENABLED`, `STORE_BILLING_GRACE_DAYS`, `STORE_LINK_BASE`, `STORE_ORDER_MAX_OPEN_PER_STORE`, `STORE_ORDER_RESERVATION_HOURS`, `STORE_ORDER_SELLER_RESPONSE_HOURS`, `TEXIN_API_KEY`, `TEXIN_BASE_URL`, `TEXIN_SENDER_ID`, `TEXIN_TIMEOUT_SECONDS`, `TEXIN_WEBHOOK_SECRET`, `THREAD_TOKEN_EXPIRE_HOURS`, `TRUSTED_PROXY_HOPS`, `VERIFIED_BADGE_ENABLED`, `ZAC_SECRET`, `ZENO_FREE_AGENT_SESSIONS_PER_DAY`, `ZENO_FREE_LISTING_SESSIONS_PER_DAY`, `ZETUPAY_BASE_URL`, `ZETUPAY_ENABLED`, `ZETUPAY_FEE_PCT`, `ZETUPAY_SECRET_KEY`, `ZETUPAY_TIMEOUT_SECONDS`
+`ACCESS_TOKEN_EXPIRE_MINUTES`, `ACTIVITY_DAY_RETENTION_DAYS`, `ACTIVITY_SAMPLE_RETENTION_DAYS`, `ACTIVITY_SESSION_RETENTION_DAYS`, `ADMIN_BOOTSTRAP_EMAIL`, `ADMIN_DASHBOARD_URL`, `ADMIN_REPORTS_ENABLED`, `ADMIN_ZENO_RATE_LIMIT_PER_MINUTE`, `AI_COVERS_ENABLED`, `AI_DEEPSEEK_INPUT_PER_1M_USD`, `AI_DEEPSEEK_OUTPUT_PER_1M_USD`, `AI_FREE_PROVIDERS`, `AI_USD_TO_KES`, `ALLOWED_ORIGINS`, `AT_API_KEY`, `AT_SENDER_ID`, `AT_USERNAME`, `AUCTIONS_ENABLED`, `AUCTION_DEFAULT_DURATION_HOURS`, `AUCTION_DEFAULT_MIN_INCREMENT`, `AUCTION_ENDING_SOON_MINUTES`, `AUCTION_FUNDING_SETTLE_MINUTES`, `AUCTION_PAYMENT_DEADLINE_HOURS`, `BROKA_ADMIN_EMAIL_FROM`, `BROKA_NATIVE`, `BUY_AGENT_MAX_ACTIVE`, `BUY_AGENT_WATCH_DAYS`, `CALL_RINGING_PRECONNECT`, `CALL_TOKEN_EXPIRE_MINUTES`, `CLIENT_IP_HEADER`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_TURN_API_TOKEN`, `CLOUDFLARE_TURN_KEY_ID`, `DATABASE_URL`, `DCR_ENABLED`, `DEBUG`, `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_TIMEOUT_SECONDS`, `ECONFIRM_API_KEY`, `ECONFIRM_BASE_URL`, `ECONFIRM_FALLBACK_EMAIL_DOMAIN`, `ECONFIRM_MAX_POLL_SECONDS`, `ECONFIRM_POLL_INTERVAL_SECONDS`, `ECONFIRM_TIMEOUT_SECONDS`, `ENV`, `ENVIRONMENT`, `ESCROW_GUIDANCE_ENABLED`, `ESCROW_PRICING_MAX_AGE_DAYS`, `ESCROW_PROVIDER_DOMAINS`, `ESCROW_RECORD_MAX_AGE_DAYS`, `EXPIRY_SMS_DAYS_BEFORE`, `EXPIRY_SMS_ENABLED`, `FOUNDING_DISCOUNT_DAYS`, `FOUNDING_SELLER_TIERS`, `FREE_LISTINGS_PER_SELLER`, `FREE_LISTING_OFFER_DAYS`, `FREE_LISTING_OFFER_LIMIT`, `FREE_STORE_OFFER_DAYS`, `FREE_STORE_OFFER_LIMIT`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `GROQ_API_KEY`, `HF_SHOWCASE_MODEL`, `HF_TOKEN`, `IN_APP_PAYMENTS_ENABLED`, `LISTING_FEES_ENABLED`, `MARKET_TRENDING_WEIGHTS`, `MAX_REQUEST_BODY_MB`, `MEDIA_PUBLIC_BASE_URL`, `MOBITECH_API_KEY`, `MOBITECH_BASE_URL`, `MOBITECH_SENDER_NAME`, `MOBITECH_SEND_ENDPOINT`, `MPESA_B2C_CREDENTIAL`, `MPESA_B2C_INITIATOR`, `MPESA_B2C_RESULT_URL`, `MPESA_B2C_TIMEOUT_URL`, `MPESA_CALLBACK_SECRET`, `MPESA_CALLBACK_URL`, `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET`, `MPESA_ENV`, `MPESA_FEATURED_CALLBACK_URL`, `MPESA_LISTING_FEE_CALLBACK_URL`, `MPESA_PASSKEY`, `MPESA_PREMIUM_CALLBACK_URL`, `MPESA_SHORTCODE`, `MPESA_STORE_CALLBACK_URL`, `MPESA_VERIFY_CALLBACK_URL`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `OPS_SAMPLE_RETENTION_DAYS`, `OPS_SAMPLE_SECONDS`, `OTP_EXPIRY_SECONDS`, `OTP_LENGTH`, `OTP_MAX_ATTEMPTS`, `PHONE_VERIFY_TOKEN_EXPIRE_MINUTES`, `PLATFORM_FIXED_MONTHLY_COST_KES`, `PREMIUM_ENABLED`, `PUBLIC_API_BASE_URL`, `R2_ACCESS_KEY_ID`, `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_SECRET_ACCESS_KEY`, `REDIS_URL`, `REFRESH_TOKEN_EXPIRE_DAYS`, `RENDER`, `REPORT_TZ_OFFSET_HOURS`, `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `SECRET_KEY`, `SENTRY_DSN`, `SERVICE_COMMUNICATION_ANNOUNCEMENT_TTL_DAYS`, `SERVICE_COMMUNICATION_CLAIM_SECONDS`, `SERVICE_COMMUNICATION_COMMUNICATION_BATCH`, `SERVICE_COMMUNICATION_MAX_ATTEMPTS`, `SERVICE_COMMUNICATION_MAX_AUDIENCE`, `SERVICE_COMMUNICATION_MAX_EXPLICIT_RECIPIENTS`, `SERVICE_COMMUNICATION_PROVIDER_CONCURRENCY`, `SERVICE_COMMUNICATION_PROVIDER_TIMEOUT_SECONDS`, `SERVICE_COMMUNICATION_RECIPIENT_BATCH`, `SERVICE_COMMUNICATION_RETENTION_DAYS`, `SERVICE_COMMUNICATION_RETRY_BASE_SECONDS`, `SERVICE_COMMUNICATION_RETRY_MAX_SECONDS`, `SERVICE_COMMUNICATION_SWEEP_SECONDS`, `SERVICE_USAGE_ENABLED`, `SERVICE_USAGE_RETENTION_DAYS`, `SMS_COST_MINOR_AT`, `SMS_COST_MINOR_MOBITECH`, `SMS_COST_MINOR_TEXIN`, `STOREFRONT_API_KEY`, `STORE_BILLING_ENABLED`, `STORE_BILLING_GRACE_DAYS`, `STORE_LINK_BASE`, `STORE_ORDER_MAX_OPEN_PER_STORE`, `STORE_ORDER_RESERVATION_HOURS`, `STORE_ORDER_SELLER_RESPONSE_HOURS`, `TEXIN_API_KEY`, `TEXIN_BASE_URL`, `TEXIN_SENDER_ID`, `TEXIN_TIMEOUT_SECONDS`, `TEXIN_WEBHOOK_SECRET`, `THREAD_TOKEN_EXPIRE_HOURS`, `TRUSTED_PROXY_HOPS`, `VERIFIED_BADGE_ENABLED`, `ZAC_SECRET`, `ZENO_FREE_AGENT_SESSIONS_PER_DAY`, `ZENO_FREE_LISTING_SESSIONS_PER_DAY`, `ZETUPAY_BASE_URL`, `ZETUPAY_ENABLED`, `ZETUPAY_FEE_PCT`, `ZETUPAY_SECRET_KEY`, `ZETUPAY_TIMEOUT_SECONDS`
 
 ## Backend tests
 
-194 files in `backend/tests/`.
+195 files in `backend/tests/`.
 
 - `test_account_moderation.py` — Restriction, suspension and reinstatement, enforced by the backend.
 - `test_admin_additions.py` — Admin additions: SMS cost hook, timeseries, detail reads, users search.
@@ -1099,6 +1122,7 @@ Read by `backend/api/core/config.py`; documented in `.env.example` and
 - `test_admin_market_intel.py` — Listing / marketplace intelligence, anomaly detection and models.
 - `test_admin_operations.py` — The operations workspace: samples added across processes, durable rows for payments, delivery and calls, and what is unavailable before sam…
 - `test_admin_revenue.py` — Revenue endpoint: income/cost/profit math, grouping, buckets, no double count.
+- `test_admin_zeno.py` — Administrative Zeno (Jarvis Mode) - Phase 1.
 - `test_ai_broker_deepseek.py` — Tests for DeepSeek V4 Flash - DIRECT API integration in the AI broker (api/domains/ai_broker/service.py).
 - `test_ai_broker_v4.py` — Tests for AI broker with circuit breaker integration (v4.0).
 - `test_ai_connection_release.py` — No database connection is held while Zeno waits on a model.
@@ -1988,6 +2012,7 @@ Modules:
 ## Documents
 
 - `ADMIN_INTELLIGENCE.md` — Admin intelligence: activity, account status and the Command Center
+- `ADMIN_ZENO_ARCHITECTURE.md` — Administrative Zeno (Jarvis Mode) — Phase 1 architecture
 - `AGENTS.md` — Working on BROKA
 - `AI_AUDIT.md` — AI integration audit + cost controls (2026-09-14)
 - `ARCHITECTURE.md` — BROKA v4.0 — Architecture Guide

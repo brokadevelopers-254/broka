@@ -276,6 +276,40 @@ by email only to administrators with an address, chosen by id, and only with
 `ADMIN_DASHBOARD_URL` is set. No attachment, no personal data. Scheduled runs
 follow `ADMIN_REPORTS_ENABLED` with the founder briefs.
 
+## Administrative Zeno (Jarvis Mode)
+
+Code: `backend/api/domains/admin_zeno/`. Full design:
+[`ADMIN_ZENO_ARCHITECTURE.md`](ADMIN_ZENO_ARCHITECTURE.md).
+
+A separate administrative intelligence interface at `/admin/zeno`, not the
+customer-facing Zeno assistant and not the deterministic
+`POST /admin/assistant/ask` (which is unchanged). It plans an investigation
+from a closed registry of 23 read-only tools, runs at most four per turn, and
+synthesizes an answer in which every figure cites an `Evidence` object that
+was actually retrieved.
+
+- **Endpoints**: `GET /admin/zeno/status`, `GET /admin/zeno/briefing`,
+  `POST /admin/zeno/chat`, and owner-scoped conversation list/read/delete.
+- **Permission**: `ADMIN_SUMMARY` for the interface; `VIEW_TRANSACTIONS` for
+  finance tools, `VIEW_ALL_DISPUTES` for trust aggregates.
+- **Flag**: `ADMIN_ZENO_ENABLED`, off in production unless set. Disabled, only
+  the `/admin/zeno` routes answer `503 ADMIN_ZENO_DISABLED`.
+- **Evidence rules**: an unavailable metric is `available: false` with a
+  reason, never zero; estimated figures are labelled `estimated`; an answer
+  citing evidence that was not supplied is rejected and replaced with a
+  verified-figures-only fallback.
+- **Business model**: deal value and escrow principal are never BROKA revenue,
+  and BROKA never holds buyer or seller funds.
+- **Cost**: every successful Jarvis model call is recorded in the existing
+  cost ledger with `call_site="admin_zeno.chat"`, separate from customer Zeno.
+  Unpriced calls remain unpriced, not zero.
+- **Conversations**: two tables created by `create_all()`,
+  `admin_zeno_conversations` and `admin_zeno_turns`; owner-scoped on every
+  read/delete, 30-day retention refreshed per turn and enforced by the
+  5-minute sweep. Customer `zeno_conversations` / `zeno_turns` are untouched.
+- **No mutations**: Jarvis recommends a dashboard page; it never suspends an
+  account, moves money, sends a message or edits a record.
+
 ## Data protection
 
 These records describe how people use the app, which is personal data under
