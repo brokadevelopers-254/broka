@@ -490,6 +490,11 @@ async def _periodic_sweep_pass() -> None:
         logger.error("[sweep] ML retrain failed: %s", exc)
         ops_metrics.task_failed("periodic", "ml_retrain", exc)
     try:
+        await task_cleanup_admin_zeno_conversations()
+    except Exception as exc:
+        logger.error("[sweep] admin Zeno retention failed: %s", exc)
+        ops_metrics.task_failed("periodic", "admin_zeno_retention", exc)
+    try:
         await task_check_call_expiry()
     except Exception as exc:
         logger.error("[sweep] call expiry check failed: %s", exc)
@@ -650,6 +655,25 @@ async def task_reconcile_zetupay_payments(ctx: dict | None = None) -> None:
         changed = await reconcile_stale(session)
     if changed:
         logger.info("[sweep] ZetuPay reconciliation settled or failed %d payment(s)", changed)
+
+
+async def task_cleanup_admin_zeno_conversations(ctx: dict | None = None) -> int:
+    """Delete administrative Zeno conversations past their 30-day retention.
+
+    A no-op while ADMIN_ZENO_ENABLED is off, so a deployment that never opted
+    into Jarvis carries no extra query. Expired conversations are already
+    unreachable (ownership lookups do not filter by expiry because expiry is
+    enforced by this sweep), so this bounds storage only.
+    """
+    from api.core.config import settings
+
+    if not settings.admin_zeno_enabled:
+        return 0
+    from api.database import AsyncSessionLocal
+    from api.domains.admin_zeno import conversation_service
+
+    async with AsyncSessionLocal() as session:
+        return await conversation_service.cleanup_expired(session)
 
 
 async def task_backfill_media(ctx: dict | None = None) -> None:

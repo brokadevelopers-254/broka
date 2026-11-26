@@ -364,6 +364,11 @@ app.include_router(admin_operations_router, prefix="/admin", tags=["Admin - Oper
 # The report builder: custom reports, their schedules and archive (api/core/report_builder.py).
 from api.domains.admin.report_builder import router as admin_report_builder_router
 app.include_router(admin_report_builder_router, prefix="/admin/report-builder", tags=["Admin - Report builder"])
+# Administrative Zeno (Jarvis Mode): a dedicated read-only intelligence domain
+# with its own model gateway, tool registry and conversations. Mounted at
+# /admin/zeno; gated by ADMIN_ZENO_ENABLED and ADMIN_SUMMARY.
+from api.domains.admin_zeno.router import router as admin_zeno_router
+app.include_router(admin_zeno_router, prefix="/admin/zeno", tags=["Admin - Zeno (Jarvis Mode)"])
 # The Intelligence Assistant: read-only answers from the verified analytics (api/core/assistant.py).
 from api.domains.admin.assistant import router as admin_assistant_router
 app.include_router(admin_assistant_router, prefix="/admin/assistant", tags=["Admin - Assistant"])
