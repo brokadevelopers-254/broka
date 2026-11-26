@@ -286,7 +286,8 @@ customer-facing Zeno assistant and not the deterministic
 `POST /admin/assistant/ask` (which is unchanged). It plans an investigation
 from a closed registry of 23 read-only tools, runs at most four per turn, and
 synthesizes an answer in which every figure cites an `Evidence` object that
-was actually retrieved.
+was actually retrieved and matches it exactly (structured claims: value, unit,
+confidence and a permitted derivation).
 
 - **Endpoints**: `GET /admin/zeno/status`, `GET /admin/zeno/briefing`,
   `POST /admin/zeno/chat`, and owner-scoped conversation list/read/delete.
@@ -294,10 +295,21 @@ was actually retrieved.
   finance tools, `VIEW_ALL_DISPUTES` for trust aggregates.
 - **Flag**: `ADMIN_ZENO_ENABLED`, off in production unless set. Disabled, only
   the `/admin/zeno` routes answer `503 ADMIN_ZENO_DISABLED`.
+- **Privacy boundary**: every prompt passes through
+  `admin_zeno/sanitizer.py`, which projects tool data onto an explicit
+  per-tool allowlist and removes identifiers, names, contact details,
+  credentials and message content at any depth. Trust outputs a count rather
+  than a list of repeatedly reported accounts; marketplace outputs ranking
+  positions rather than seller or listing identities.
 - **Evidence rules**: an unavailable metric is `available: false` with a
-  reason, never zero; estimated figures are labelled `estimated`; an answer
-  citing evidence that was not supplied is rejected and replaced with a
-  verified-figures-only fallback.
+  reason, never zero; estimated figures are labelled `estimated`; every
+  numerical finding carries structured claims validated server-side, free text
+  may not introduce an unsupported figure, and an answer that fails validation
+  is replaced with a verified-figures-only fallback.
+- **Briefing**: findings reference the exact evidence keys the briefing
+  returns (validated before the response is built), the reported period is the
+  requested interval (`now − window_days` to `now`, UTC), and the one-day
+  anomaly detectors' evaluation dates are exposed separately.
 - **Business model**: deal value and escrow principal are never BROKA revenue,
   and BROKA never holds buyer or seller funds.
 - **Cost**: every successful Jarvis model call is recorded in the existing
@@ -305,8 +317,9 @@ was actually retrieved.
   Unpriced calls remain unpriced, not zero.
 - **Conversations**: two tables created by `create_all()`,
   `admin_zeno_conversations` and `admin_zeno_turns`; owner-scoped on every
-  read/delete, 30-day retention refreshed per turn and enforced by the
-  5-minute sweep. Customer `zeno_conversations` / `zeno_turns` are untouched.
+  read/delete, 30-day retention refreshed per valid turn, enforced at read
+  time and erased by the 5-minute sweep even when the flag is off. Customer
+  `zeno_conversations` / `zeno_turns` are untouched.
 - **No mutations**: Jarvis recommends a dashboard page; it never suspends an
   account, moves money, sends a message or edits a record.
 

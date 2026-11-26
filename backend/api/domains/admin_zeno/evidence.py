@@ -21,6 +21,7 @@ from typing import Any, Iterable, Optional
 from api.domains.admin_zeno.schemas import (
     Answer,
     ChatResponse,
+    Claim,
     Evidence,
     Finding,
     Period,
@@ -163,7 +164,20 @@ def fallback_response(
     summary = " ".join(lines[:12]) if lines else "No verified figures were retrieved."
     reasons = [reason, *limitations]
     findings = [
-        Finding(statement=f"{e.label} was {_fmt(e.value, e.unit)}.", evidence=[e.metric_key])
+        Finding(
+            statement=f"{e.label} was {_fmt(e.value, e.unit)}.",
+            evidence=[e.metric_key],
+            # A structured claim travels with the fallback too, so the figure
+            # is machine-checkable rather than free text alone.
+            claims=[Claim(
+                metric_key=e.metric_key,
+                asserted_value=e.value,
+                unit=e.unit,
+                evidence_reference=e.metric_key,
+                derivation="value",
+                confidence=e.confidence,
+            )] if not isinstance(e.value, (dict, list)) else [],
+        )
         for e in evidence
         if e.available and e.value is not None
     ][:10]

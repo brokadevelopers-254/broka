@@ -14,14 +14,17 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from pydantic import Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import revenue as revenue_service
 from api.core import intelligence
 from api.core.permissions import Permission
-from api.domains.admin_zeno.schemas import ToolInput, ToolOutput
+from api.domains.admin_zeno.evidence import make_evidence, unavailable_evidence
+from api.domains.admin_zeno.schemas import Evidence, ToolInput, ToolOutput
 from api.domains.admin_zeno.tool_registry import ToolDefinition
 from api.domains.admin_zeno.tools._common import simple
+from api.models.platform_cost import CostKind, PlatformCost
 
 BUSINESS_MODEL_NOTE = (
     "BROKA is not a payment processor, wallet or escrow custodian. Deal value and escrow "
@@ -73,76 +76,206 @@ async def platform_revenue(db: AsyncSession, args: FinanceArgs) -> ToolOutput:
     )
 
 
+# A bounded scan of zero-amount rows is enough to find unpriced calls: an
+# unpriced provider call is recorded at amount 0 with meta.unpriced or
+# meta.tokens_unknown (see api/core/cost_ledger.py). Never read the whole
+# ledger to answer one question.
+MAX_UNPRICED_SCAN = 5000
+
+COST_CATEGORIES = (
+    (CostKind.AI, "AI provider costs"),
+    (CostKind.SMS, "SMS costs"),
+    (CostKind.API, "API costs"),
+    (CostKind.INFRA, "Infrastructure costs"),
+    (CostKind.OTHER, "Other service costs"),
+    (CostKind.PAYMENT_FEE, "Collection fees (derived)"),
+)
+
+
+async def _unpriced_by_kind(db: AsyncSession, start: datetime, end: datetime) -> tuple[dict[str, int], bool]:
+    """Unpriced rows per kind, from a bounded scan of zero-amount rows."""
+    rows = (await db.execute(
+        select(PlatformCost.kind, PlatformCost.meta)
+        .where(
+            PlatformCost.created_at >= start,
+            PlatformCost.created_at < end,
+            PlatformCost.kind != CostKind.PAYMENT_FEE,
+            PlatformCost.amount_minor == 0,
+        )
+        .limit(MAX_UNPRICED_SCAN + 1)
+    )).all()
+    truncated = len(rows) > MAX_UNPRICED_SCAN
+    counts: dict[str, int] = {}
+    for kind, meta in rows[:MAX_UNPRICED_SCAN]:
+        meta = meta or {}
+        if meta.get("unpriced") or meta.get("tokens_unknown"):
+            counts[str(kind)] = counts.get(str(kind), 0) + 1
+    return counts, truncated
+
+
+def _cost_evidence(
+    *,
+    key: str,
+    label: str,
+    kind: dict | None,
+    unpriced: int,
+    scan_truncated: bool,
+    any_cost_rows: bool,
+    start: datetime,
+    end: datetime,
+) -> Evidence:
+    """Classify one cost category without ever turning absence into zero.
+
+    The five states are distinct: a measured zero (rows exist, all at zero,
+    none unpriced), no rows for the category, incomplete tracking, a figure
+    from an assumed rate, and unpriced rows.
+    """
+    source = "api.core.revenue.revenue_report"
+    if kind is None:
+        if scan_truncated:
+            reason = (
+                "Cost tracking could not be read completely for this period, so this is "
+                "not a verified zero."
+            )
+        elif not any_cost_rows:
+            reason = (
+                "No cost rows were recorded at all in this period. Cost tracking may be "
+                "incomplete, so this is not a verified zero."
+            )
+        else:
+            reason = (
+                "No cost rows of this kind were recorded in the period. An absent ledger "
+                "entry is not evidence of zero spend."
+            )
+        return unavailable_evidence(
+            metric_key=f"finance.cost.{key}", label=label, source=source, reason=reason,
+            definition="Operating spend recorded in BROKA's cost ledger.", unit="kes_minor",
+        )
+    count = int(kind.get("count") or 0)
+    amount = kind.get("amount_minor")
+    if unpriced:
+        return unavailable_evidence(
+            metric_key=f"finance.cost.{key}", label=label, source=source,
+            reason=(
+                f"{unpriced} of {count} recorded rows are unpriced (provider rate or token "
+                "counts unknown), so the total understates spend and is not reported as a "
+                "measured figure."
+            ),
+            definition="Operating spend recorded in BROKA's cost ledger.", unit="kes_minor",
+        )
+    definition = f"{count} recorded rows in the period."
+    if kind.get("estimated"):
+        definition += " Priced from an assumed rate, not a provider statement."
+    elif amount == 0:
+        definition += " Every recorded row was zero: a measured zero, not an absent one."
+    return make_evidence(
+        metric_key=f"finance.cost.{key}", label=label, value=amount, unit="kes_minor",
+        source=source, definition=definition, period_start=start, period_end=end,
+        confidence="estimated" if kind.get("estimated") else "measured",
+        href="/revenue",
+    )
+
+
 async def platform_costs(db: AsyncSession, args: FinanceArgs) -> ToolOutput:
     end = datetime.utcnow()
     start = end - timedelta(days=args.window_days)
     report = await _report(db, args.window_days)
     costs = report.get("costs") or {}
-    evidence = [
-        simple(
-            prefix="finance", key="costs_total_minor", label="Recorded platform costs",
-            value=costs.get("total_minor"), unit="kes_minor",
-            source="api.core.revenue.revenue_report",
-            definition="Recorded spend in the period: SMS, AI, API, payment fees, infrastructure and other.",
-            start=start, end=end, confidence="measured", href="/revenue",
-        ),
-        simple(
-            prefix="finance", key="costs_estimated_minor", label="Costs from assumed rates",
-            value=costs.get("estimated_minor"), unit="kes_minor",
-            source="api.core.revenue.revenue_report",
-            definition="Part of recorded costs priced from an assumed rate rather than a provider statement.",
-            start=start, end=end, confidence="estimated", href="/revenue",
-        ),
-        simple(
-            prefix="finance", key="profit_minor", label="Income less recorded costs",
-            value=report.get("profit_minor"), unit="kes_minor",
-            source="api.core.revenue.revenue_report",
-            definition="Income minus recorded costs. A management figure, not an audited profit.",
-            start=start, end=end, confidence="derived", href="/revenue",
-        ),
-        simple(
-            prefix="finance", key="margin_pct", label="Margin",
-            value=report.get("margin_pct"), unit="percentage",
-            source="api.core.revenue.revenue_report",
-            definition="Income less recorded costs, as a share of income.",
-            start=start, end=end, confidence="derived", href="/revenue",
-        ),
-    ]
     by_kind = {k.get("key"): k for k in costs.get("kinds", [])}
-    for key, label in (
-        ("ai", "AI provider costs"),
-        ("sms", "SMS costs"),
-        ("api", "API costs"),
-        ("infra", "Infrastructure costs"),
-        ("other", "Other service costs"),
-    ):
-        kind = by_kind.get(key)
-        if kind is None:
-            evidence.append(simple(
-                prefix="finance.cost", key=key, label=label, value=0, unit="kes_minor",
-                source="api.core.revenue.revenue_report",
-                definition="No cost rows of this kind were recorded in the period.",
-                start=start, end=end, confidence="measured", href="/revenue",
-            ))
-        else:
-            evidence.append(simple(
-                prefix="finance.cost", key=key, label=label,
-                value=kind.get("amount_minor"), unit="kes_minor",
-                source="api.core.revenue.revenue_report",
-                definition=f"{kind.get('count')} recorded rows; estimated={bool(kind.get('estimated'))}.",
-                start=start, end=end,
-                confidence="estimated" if kind.get("estimated") else "measured",
-                href="/revenue",
-            ))
+    any_cost_rows = any(int(k.get("count") or 0) > 0 for k in by_kind.values())
+    unpriced_by_kind, scan_truncated = await _unpriced_by_kind(db, start, end)
+    unpriced_total = sum(unpriced_by_kind.values())
+    estimated_total = int(costs.get("estimated_minor") or 0)
+
+    evidence: list[Evidence] = []
+    if not any_cost_rows:
+        evidence.append(unavailable_evidence(
+            metric_key="finance.costs_total_minor", label="Recorded platform costs",
+            source="api.core.revenue.revenue_report", unit="kes_minor",
+            reason=(
+                "No cost rows were recorded in this period. Absence of ledger entries does "
+                "not prove zero spend; cost tracking may be incomplete."
+            ),
+            definition="Operating spend recorded in BROKA's cost ledger.",
+        ))
+    else:
+        total_definition = "Recorded spend in the period: SMS, AI, API, fees, infrastructure and other."
+        total_confidence = "measured"
+        if unpriced_total:
+            total_confidence = "estimated"
+            total_definition += f" {unpriced_total} rows are unpriced, so this understates spend."
+        elif estimated_total:
+            total_confidence = "estimated"
+            total_definition += " Some rows are priced from an assumed rate."
+        evidence.append(make_evidence(
+            metric_key="finance.costs_total_minor", label="Recorded platform costs",
+            value=costs.get("total_minor"), unit="kes_minor",
+            source="api.core.revenue.revenue_report", definition=total_definition,
+            period_start=start, period_end=end, confidence=total_confidence,
+            href="/revenue",
+        ))
+    evidence.append(make_evidence(
+        metric_key="finance.costs_estimated_minor", label="Costs from assumed rates",
+        value=estimated_total, unit="kes_minor",
+        source="api.core.revenue.revenue_report",
+        definition="Part of recorded costs priced from an assumed rate rather than a provider statement.",
+        period_start=start, period_end=end, confidence="estimated", href="/revenue",
+    ))
+    profit_confidence = "estimated" if (unpriced_total or estimated_total or not any_cost_rows) else "derived"
+    evidence.append(make_evidence(
+        metric_key="finance.profit_minor", label="Income less recorded costs",
+        value=report.get("profit_minor"), unit="kes_minor",
+        source="api.core.revenue.revenue_report",
+        definition=(
+            "Income minus recorded costs. A management figure, not an audited profit"
+            + ("; it excludes unpriced or unrecorded spend and therefore overstates profit."
+               if unpriced_total or not any_cost_rows else ".")
+        ),
+        period_start=start, period_end=end, confidence=profit_confidence, href="/revenue",
+    ))
+    evidence.append(make_evidence(
+        metric_key="finance.margin_pct", label="Margin", value=report.get("margin_pct"),
+        unit="percentage", source="api.core.revenue.revenue_report",
+        definition="Income less recorded costs, as a share of income.",
+        period_start=start, period_end=end, confidence=profit_confidence, href="/revenue",
+    ))
+
+    for kind_key, label in COST_CATEGORIES:
+        evidence.append(_cost_evidence(
+            key=kind_key, label=label, kind=by_kind.get(kind_key),
+            unpriced=unpriced_by_kind.get(kind_key, 0),
+            scan_truncated=scan_truncated, any_cost_rows=any_cost_rows,
+            start=start, end=end,
+        ))
+
+    limitations = [
+        BUSINESS_MODEL_NOTE,
+        "AI costs are priced from real token counts at configured rates; peak multipliers, "
+        "cache-hit ratios and FX moves are not tracked per call. Providers without a verified "
+        "rate record an unpriced row, not zero.",
+        "A category with no recorded rows is reported as unavailable, never as zero spend.",
+    ]
+    if scan_truncated:
+        limitations.append(
+            "The unpriced-row scan hit its bound; unpriced totals may be larger than reported."
+        )
     return ToolOutput(
         evidence=evidence,
-        data={"costs": costs, "notes": report.get("notes", [])},
-        limitations=[
-            BUSINESS_MODEL_NOTE,
-            "AI costs are priced from real token counts at configured rates; peak multipliers, "
-            "cache-hit ratios and FX moves are not tracked per call. Providers without a verified "
-            "rate record an unpriced row, not zero.",
-        ],
+        data={
+            "costs": costs,
+            "notes": report.get("notes", []),
+            "categories": {
+                kind_key: {
+                    "available": next(
+                        (e.available for e in evidence if e.metric_key == f"finance.cost.{kind_key}"),
+                        False,
+                    ),
+                    "unpriced_rows": unpriced_by_kind.get(kind_key, 0),
+                }
+                for kind_key, _label in COST_CATEGORIES
+            },
+        },
+        limitations=limitations,
     )
 
 

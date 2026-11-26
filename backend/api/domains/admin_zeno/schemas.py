@@ -94,11 +94,31 @@ class Answer(BaseModel):
     summary: str = Field(max_length=4000)
 
 
+class Claim(BaseModel):
+    """One structured quantitative assertion the model makes.
+
+    A valid evidence reference alone is not proof of a valid figure: the
+    stated value, unit and derivation are checked against the actual
+    evidence server-side. ``derivation`` names a rule the backend knows how
+    to compute; the model cannot invent its own derived arithmetic.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    metric_key: str = Field(min_length=1, max_length=200)
+    asserted_value: Any = None
+    unit: str = Field(default="count", max_length=40)
+    evidence_reference: str = Field(min_length=1, max_length=200)
+    derivation: Literal["value", "previous_value", "delta", "pct_change"] = "value"
+    confidence: Confidence = "measured"
+
+
 class Finding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     statement: str = Field(max_length=800)
     evidence: list[str] = Field(default_factory=list, max_length=12)
+    claims: list[Claim] = Field(default_factory=list, max_length=8)
     confidence: Confidence = "measured"
 
 
@@ -180,6 +200,9 @@ class BriefingFinding(BaseModel):
     detail: str = Field(default="", max_length=1200)
     area: str = Field(default="business", max_length=60)
     evidence: list[str] = Field(default_factory=list, max_length=12)
+    # False marks an existing signal (an alert, or a decision whose supplied
+    # evidence carries no figures) that is deliberately not evidence-backed.
+    evidence_backed: bool = True
     href: Optional[str] = Field(default=None, max_length=240)
 
 

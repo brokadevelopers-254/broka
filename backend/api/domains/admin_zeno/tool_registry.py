@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional, Type
 
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.permissions import Permission, get_user_permissions
@@ -161,12 +162,18 @@ class ToolRegistry:
         arguments: dict[str, Any],
         *,
         db: AsyncSession,
-        actor: User,
+        actor: Optional[User] = None,
+        permissions: Optional[set] = None,
     ) -> ToolExecution:
-        """Validate and run one registered tool. Never raises ToolError."""
+        """Validate and run one registered tool. Never raises ToolError.
+
+        ``permissions`` lets a caller snapshot the actor's effective
+        permissions before a turn starts, so a database recovery later in the
+        turn cannot make the check touch an expired ORM object.
+        """
         started = time.monotonic()
         try:
-            definition = self._authorise(name, actor)
+            definition = self._authorise(name, actor, permissions)
             if not isinstance(arguments, dict):
                 raise InvalidArgumentsError("arguments must be an object")
             encoded = json.dumps(arguments, default=str)
@@ -181,13 +188,18 @@ class ToolRegistry:
                 ) from None
 
             try:
-                output = await asyncio.wait_for(
-                    definition.handler(db, parsed), timeout=definition.timeout_seconds
-                )
+                output = await self._call(definition, parsed, db)
             except asyncio.TimeoutError:
+                # The handler was cancelled mid-statement, so its transaction
+                # is no longer safe to reuse: recover it before the next tool.
+                await self._recover_session(db)
                 raise ToolTimeoutError(
                     f"tool {name!r} exceeded {definition.timeout_seconds:g}s"
                 ) from None
+            except asyncio.CancelledError:
+                # Never swallow cancellation: the whole turn is being torn down.
+                await self._recover_session(db)
+                raise
             if not isinstance(output, ToolOutput):
                 raise ToolExecutionError("tool returned an unexpected result type")
             return ToolExecution(
@@ -209,20 +221,71 @@ class ToolRegistry:
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
         except Exception as exc:  # a handler failure must not abort the turn
+            await self._recover_session(db)
+            is_database = isinstance(exc, SQLAlchemyError)
+            # Type only: a database driver message can quote SQL or row data.
             log.warning(
                 "[admin_zeno] tool failed name=%s error=%s", name, type(exc).__name__
             )
             return ToolExecution(
                 name=name,
                 ok=False,
-                error_category="execution_error",
-                error_message=f"{type(exc).__name__} while running the tool",
+                error_category="data_unavailable" if is_database else "execution_error",
+                error_message=(
+                    "The tool could not read its data."
+                    if is_database else f"{type(exc).__name__} while running the tool"
+                ),
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
 
-    def _authorise(self, name: str, actor: User) -> ToolDefinition:
+    @staticmethod
+    async def _call(
+        definition: ToolDefinition, parsed: BaseModel, db: Optional[AsyncSession]
+    ) -> ToolOutput:
+        """Run a handler inside a savepoint when a session is available.
+
+        A failed statement then rolls back to the savepoint instead of
+        invalidating the whole session, so the next tool in the same turn runs
+        on a usable connection and objects loaded before it stay valid.
+        """
+        async def run() -> ToolOutput:
+            return await asyncio.wait_for(
+                definition.handler(db, parsed), timeout=definition.timeout_seconds
+            )
+
+        if db is None:
+            return await run()
+        async with db.begin_nested():
+            return await run()
+
+    @staticmethod
+    async def _recover_session(db: Optional[AsyncSession]) -> None:
+        """Return a session left in a failed transaction to a usable state.
+
+        Tools share one ``AsyncSession``; without this, one failed statement
+        would make every later tool in the same investigation fail too. Only a
+        session that actually holds an open transaction is rolled back, and
+        only the exception type is logged - never SQL or row data.
+        """
+        if db is None:
+            return
+        try:
+            # Normally the tool's savepoint already rolled back and the
+            # session is fine; a full rollback is only needed when the
+            # session itself was deactivated (savepoint creation failed).
+            if not db.is_active:
+                await db.rollback()
+        except Exception as exc:  # recovery must never mask the tool failure
+            log.warning(
+                "[admin_zeno] session recovery failed error=%s", type(exc).__name__
+            )
+
+    def _authorise(
+        self, name: str, actor: Optional[User], permissions: Optional[set] = None
+    ) -> ToolDefinition:
         definition = self.get(name)
-        if definition.permission not in get_user_permissions(actor):
+        effective = permissions if permissions is not None else get_user_permissions(actor)
+        if definition.permission not in effective:
             # Checked here, not only in the prompt: model output is untrusted.
             raise ToolPermissionError(
                 f"missing permission {definition.permission.value} for tool {name!r}"
