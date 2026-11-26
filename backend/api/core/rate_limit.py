@@ -360,3 +360,8 @@ admin_email_send_limiter = _make_limiter(
 # client from tying up the database.
 report_builder_limiter = _make_limiter(
     "report_builder", limit=1000 if _settings.is_test else 60, window_seconds=3600)
+# The Intelligence Assistant (api/domains/admin/assistant.py), keyed by the
+# signed-in administrator. Each question reads a few aggregates, so this is
+# set for a person asking questions, not a script.
+assistant_limiter = _make_limiter(
+    "assistant", limit=1000 if _settings.is_test else 120, window_seconds=3600)

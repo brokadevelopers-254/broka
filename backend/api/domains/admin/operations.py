@@ -8,7 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.core import operations
+from api.core import ops_anomalies, operations
 from api.core.permissions import Permission, require_permission
 from api.database import User, get_db
 
@@ -24,3 +24,13 @@ async def admin_operations(
     """API, database, payments, notifications, calls and background work for
     the window against the one before."""
     return await operations.operations_report(db, window_hours=window_hours)
+
+
+@router.get("/operations/anomalies")
+async def admin_operations_anomalies(
+    admin: User = Depends(require_permission(Permission.ADMIN_SUMMARY)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Operations figures that moved outside their usual range on the last
+    complete UTC day. Read-only: a flag describes a change and acts on nothing."""
+    return await ops_anomalies.detect(db)
