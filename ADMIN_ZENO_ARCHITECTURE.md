@@ -218,9 +218,55 @@ Failure responses:
 | 429 | — | Per-administrator rate limit |
 | 503 | `ADMIN_ZENO_DISABLED` | Feature flag off |
 | 503 | `MODEL_UNAVAILABLE` | No provider produced a usable response; no answer was generated |
+| 503 | `MODEL_CONTEXT_UNSAFE` | The question could not be prepared safely for a model, so nothing was sent |
 | 504 | `INVESTIGATION_TIMEOUT` | Whole-turn limit exceeded |
 
 ## Model-context privacy boundary
+
+One preparation step stands between a turn and any prompt:
+`sanitizer.prepare_model_context` sanitizes the administrator's **current**
+message, the stored transcript and the dashboard context, and returns a
+`ModelContext`. `orchestrator._run` reads the question, history and context
+from that object for planning and synthesis, and extends the same object with
+retrieved intelligence (`with_intelligence`) before synthesis. A repair prompt
+carries only the model's own scrubbed output and validation errors. When no
+safe question can be produced, `UnsafeModelContext` is raised and the route
+answers `503 MODEL_CONTEXT_UNSAFE`; nothing is sent.
+
+The administrator's message is *not* trusted either. `sanitize_admin_message`
+is layered, and the last layer is a conservative fallback rather than a single
+regex:
+
+- Credentials first (`Bearer …`, API-key shapes, `password=…`, PEM blocks),
+  then e-mail addresses, UUIDs, other long opaque ids and labelled ids
+  (`seller_id=…`), then phone numbers (international with `+`, Kenyan `07…`/
+  `254…`, and separated digit groups), then names.
+- Names are caught by a role label (`seller Jane Doe`), a name label
+  (`name: …`), and finally by a title-case run of two or three words that is
+  not domain vocabulary, a place, a brand or a date. An unfamiliar name is
+  redacted rather than assumed safe; `_SAFE_TITLE_WORDS` is the tuning surface
+  that keeps business wording readable.
+- Each value becomes a per-kind handle (`[PERSON_1]`, `[PHONE_1]`, `[EMAIL_1]`,
+  `[ID_1]`, `[CREDENTIAL_1]`), reused for the same value. The real value stays
+  in the backend for that turn only: it is never serialized, logged or stored,
+  and the prompt receives only the handle, its kind and the role the
+  administrator stated. The question keeps its business meaning.
+- A question reduced to handles alone is refused instead of being sent.
+- The stored turn keeps the administrator's original text; only the
+  model-facing representation is sanitized.
+
+The dashboard context is projected onto `page` (a bounded dashboard path, and
+dropped entirely if it still looks like it carries a contact detail) and
+`period_days`; every other key is discarded at this boundary even when the
+orchestrator is called outside the request model.
+
+The last boundary is at the transport. `model_gateway.assert_payload_is_safe`
+walks every string in the payload each provider function is about to POST and
+refuses it (`UnsafeModelContext`, naming only the category) if it contains an
+e-mail, UUID, credential shape, phone number or labelled id. `complete()`
+checks the assembled prompt too. A future stage that builds its own prompt, or
+a tool that widens what it returns, therefore fails closed instead of reaching
+a provider.
 
 No tool payload reaches a provider directly. `sanitizer.sanitize_model_context`
 runs on the serialized evidence and tool data immediately before the
@@ -251,6 +297,10 @@ the raw rows:
 after its role (`seller Jane …`), credentials, e-mail addresses, UUIDs and
 other long opaque ids, phone numbers and PEM blocks are replaced with
 `[redacted]`, `[name]`, `[credential]`, `[email]`, `[id]` or `[number]`.
+- A name with no label or role in front of it (an older answer that simply
+  said "Jane Wanjiru has not replied") is caught by the same conservative
+  title-case fallback used for today's message, so a legacy turn is held to
+  the current policy rather than to the policy of the day it was written.
 - A turn that is empty after scrubbing is dropped, and the transcript is
 bounded in turns and characters.
 - When anything was withheld the answer says so in a limitation. The

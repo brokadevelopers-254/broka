@@ -28,6 +28,7 @@ from api.domains.admin_zeno.orchestrator import (
     OrchestrationTimeout,
     get_orchestrator,
 )
+from api.domains.admin_zeno.sanitizer import UnsafeModelContext
 from api.domains.admin_zeno.schemas import (
     ChatRequest,
     ChatResponse,
@@ -126,6 +127,20 @@ async def zeno_chat(
     except ConversationNotFound:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
+        ) from None
+    except UnsafeModelContext:
+        # A controlled refusal: the question or its context could not be made
+        # safe to send, so nothing was sent. The response names no content and
+        # no provider detail.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "MODEL_CONTEXT_UNSAFE",
+                "message": (
+                    "This question could not be prepared safely for the model. "
+                    "Remove personal details or ask about aggregate figures."
+                ),
+            },
         ) from None
     except ModelUnavailable:
         raise HTTPException(

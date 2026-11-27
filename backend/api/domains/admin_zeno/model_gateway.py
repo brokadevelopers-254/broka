@@ -23,7 +23,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 import httpx
 
@@ -41,12 +41,46 @@ from api.domains.admin_zeno.constants import (
     MAX_MODEL_OUTPUT_CHARS,
     MODEL_CALL_TIMEOUT_SECONDS,
 )
+from api.domains.admin_zeno.sanitizer import UnsafeModelContext, outbound_violation
 
 log = logging.getLogger(__name__)
 
 CALL_SITE = "admin_zeno.chat"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+
+def _strings_in(value: Any) -> Iterator[str]:
+    """Every string in a provider payload, at any depth."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings_in(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _strings_in(item)
+
+
+def assert_payload_is_safe(payload: Any, *, stage: str) -> None:
+    """The final boundary, at the transport rather than at the caller.
+
+    Sanitization happens before a prompt is assembled; this check runs on the
+    serialized payload each provider function is about to POST. A future call
+    site that builds a prompt itself, or a tool that widens what it returns,
+    therefore fails closed instead of reaching a provider. Only the category
+    is ever named - never the value, the prompt or the payload.
+    """
+    for text in _strings_in(payload):
+        category = outbound_violation(text)
+        if category:
+            log.warning(
+                "[admin_zeno] outbound payload refused stage=%s category=%s",
+                stage, category,
+            )
+            raise UnsafeModelContext(
+                f"The model request was refused before transport ({category})."
+            )
 
 
 class ModelUnavailable(Exception):
@@ -113,6 +147,11 @@ class AdminModelGateway:
         started = time.monotonic()
         attempted: list[str] = []
         errors: list[str] = []
+
+        # Checked here as well as inside each provider function: a stage that
+        # assembles a prompt itself cannot reach the transport with identity
+        # or a credential in it.
+        assert_payload_is_safe({"prompt": prompt}, stage=stage)
 
         chain = (
             ("gemini", self.gemini_key, gemini_breaker, self._call_gemini),
@@ -192,6 +231,7 @@ class AdminModelGateway:
                 "responseMimeType": "application/json",
             },
         }
+        assert_payload_is_safe(payload, stage="gemini")
         async with httpx.AsyncClient(timeout=MODEL_CALL_TIMEOUT_SECONDS) as client:
             response = await client.post(
                 f"{url}?key={self.gemini_key}", json=payload
@@ -218,6 +258,7 @@ class AdminModelGateway:
             "Authorization": f"Bearer {self.deepseek_key}",
             "Content-Type": "application/json",
         }
+        assert_payload_is_safe(payload, stage="deepseek")
         async with httpx.AsyncClient(timeout=settings.deepseek_timeout_seconds) as client:
             response = await client.post(url, json=payload, headers=headers)
         response.raise_for_status()
@@ -241,6 +282,7 @@ class AdminModelGateway:
             "HTTP-Referer": "https://broka.co.ke",
             "X-Title": "BROKA Admin Zeno",
         }
+        assert_payload_is_safe(payload, stage="openrouter")
         async with httpx.AsyncClient(timeout=MODEL_CALL_TIMEOUT_SECONDS) as client:
             response = await client.post(OPENROUTER_URL, json=payload, headers=headers)
         response.raise_for_status()
@@ -262,6 +304,7 @@ class AdminModelGateway:
             "Authorization": f"Bearer {self.groq_key}",
             "Content-Type": "application/json",
         }
+        assert_payload_is_safe(payload, stage="groq")
         async with httpx.AsyncClient(timeout=MODEL_CALL_TIMEOUT_SECONDS) as client:
             response = await client.post(GROQ_URL, json=payload, headers=headers)
         response.raise_for_status()

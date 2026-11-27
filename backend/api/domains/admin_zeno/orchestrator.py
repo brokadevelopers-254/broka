@@ -63,8 +63,10 @@ from api.domains.admin_zeno.model_gateway import (
     get_gateway,
 )
 from api.domains.admin_zeno.sanitizer import (
-    sanitize_history,
-    sanitize_model_context,
+    ModelContext,
+    UnsafeModelContext,
+    prepare_model_context,
+    scrub_free_text,
 )
 from api.domains.admin_zeno.schemas import (
     Answer,
@@ -134,10 +136,12 @@ class AdminZenoOrchestrator:
             raise OrchestrationTimeout(
                 "The investigation exceeded its time limit. Try a narrower question."
             ) from None
-        except ModelUnavailable:
+        except (ModelUnavailable, UnsafeModelContext):
             # A conversation with no turns is noise; only one created by this
             # failed turn is removed. An existing conversation is kept because
-            # its earlier turns are still valid history.
+            # its earlier turns are still valid history. An unsafe context is
+            # handled the same way: no answer was produced, so a new empty
+            # conversation must not be left behind.
             await self._discard_new(db, owned_id, owned_by, is_new)
             raise
 
@@ -206,11 +210,17 @@ class AdminZenoOrchestrator:
         history = await conversation_service.recent_turns(
             db, conversation_id=conversation_id, limit=MAX_CONTEXT_TURNS
         )
-        # Stored turns are re-sent to a provider on every later turn, and
-        # legacy ones predate the data boundary that produced today's answer.
-        # They are scrubbed here, once, so planning, synthesis and repair all
-        # see the same safe transcript and none of them can be the leak.
-        history, history_redactions = sanitize_history(history)
+        # The single preparation step before any prompt exists. It sanitizes
+        # the administrator's *current* message as well as the stored
+        # transcript (legacy turns predate the boundary that produced today's
+        # answer), and projects the dashboard context. Planning, synthesis and
+        # repair all read from this object, so no stage can be the leak.
+        prepared: ModelContext = prepare_model_context(
+            message=message, history=history, dashboard_context=context
+        )
+        message = prepared.question
+        history = prepared.history
+        context = prepared.dashboard_context
         # Snapshot authorisation before any tool can recover the session: the
         # permission check must not depend on an ORM object that a rollback
         # may have expired.
@@ -221,7 +231,8 @@ class AdminZenoOrchestrator:
         await release_connection(db, before="admin_zeno.plan")
 
         plan, plan_reply, plan_repaired = await self._plan(
-            message=message, history=history, actor=actor, context=context
+            message=message, history=history, actor=actor, context=context,
+            subjects=prepared.subject_brief(),
         )
         action = plan.get("action")
         if action not in ("investigate", "clarify", "unsupported"):
@@ -255,12 +266,7 @@ class AdminZenoOrchestrator:
         if not isinstance(requested, list):
             raise ModelUnavailable("The planner returned an unusable tool list.")
 
-        limitations: list[str] = []
-        if history_redactions:
-            limitations.append(
-                "Earlier turns contained identifying details, which were withheld "
-                "from the model before this answer was produced."
-            )
+        limitations: list[str] = list(prepared.limitations)
         if len(requested) > MAX_TOOL_EXECUTIONS_PER_TURN:
             requested = requested[:MAX_TOOL_EXECUTIONS_PER_TURN]
             limitations.append(
@@ -295,17 +301,14 @@ class AdminZenoOrchestrator:
             tool_data.append({"tool": name, "data": execution.data})
 
         evidence = dedupe(evidence)[:MAX_EVIDENCE_FOR_MODEL]
-        # The single boundary between retrieved data and a model prompt. It
-        # runs on the actual serialized context, not on one tool's output, so
-        # a tool cannot widen what a provider sees by forgetting to redact.
-        context_view = sanitize_model_context(evidence, tool_data)
-        if context_view.removed:
-            limitations.append(
-                "Some retrieved fields were withheld from the model because they could "
-                "identify a customer. The aggregated figures are unaffected."
-            )
-        evidence = context_view.evidence
-        tool_data = context_view.tool_data
+        # Extend the same prepared context with the retrieved intelligence. The
+        # boundary runs on the serialized evidence and tool data, not on one
+        # tool's output, so a tool cannot widen what a provider sees by
+        # forgetting to redact in its own module.
+        prepared = prepared.with_intelligence(evidence, tool_data)
+        evidence = prepared.evidence
+        tool_data = prepared.tool_data
+        limitations = list(prepared.limitations)
         if not evidence:
             return self._simple_response(
                 conversation_id=conversation_id,
@@ -329,6 +332,7 @@ class AdminZenoOrchestrator:
             message=message,
             history=history,
             context=context,
+            subjects=prepared.subject_brief(),
             evidence=evidence,
             tool_data=tool_data,
             limitations=limitations,
@@ -389,7 +393,7 @@ class AdminZenoOrchestrator:
         )
         return response
 
-    async def _plan(self, *, message, history, actor, context):
+    async def _plan(self, *, message, history, actor, context, subjects=None):
         tools = self.registry.prompt_specs(actor)
         prompt = prompts.planning_prompt(
             question=message,
@@ -399,6 +403,7 @@ class AdminZenoOrchestrator:
             max_tools=MAX_TOOL_EXECUTIONS_PER_TURN,
             max_context_turns=MAX_CONTEXT_TURNS,
             max_context_chars=MAX_CONTEXT_CHARS_PER_TURN,
+            subjects=subjects,
         )
         reply = await self.gateway.complete(prompt, stage="planning", max_tokens=1600)
         try:
@@ -427,7 +432,7 @@ class AdminZenoOrchestrator:
 
     async def _synthesize(
         self, *, message, history, context, evidence, tool_data, limitations,
-        allow_repair: bool = True,
+        subjects=None, allow_repair: bool = True,
     ) -> Optional[tuple[dict, GatewayReply]]:
         payload = [
             e.model_dump(mode="json") for e in evidence
@@ -441,6 +446,7 @@ class AdminZenoOrchestrator:
             history=history,
             max_context_turns=MAX_CONTEXT_TURNS,
             max_context_chars=MAX_CONTEXT_CHARS_PER_TURN,
+            subjects=subjects,
         )
         reply = await self.gateway.complete(prompt, stage="synthesis", max_tokens=2400)
         try:
@@ -469,8 +475,14 @@ class AdminZenoOrchestrator:
             return None
 
     async def _repair(self, *, previous, errors, stage, max_tokens) -> GatewayReply:
+        # The repair prompt carries the model's own output and the validation
+        # messages, which quote what it wrote (an unknown evidence key, for
+        # one). Neither is trusted: echoing a contact detail it invented would
+        # otherwise reach the transport on the retry.
+        clean_previous, _ = scrub_free_text(str(previous or ""))
+        clean_errors = [scrub_free_text(str(error))[0] for error in errors]
         return await self.gateway.complete(
-            prompts.repair_prompt(previous=previous, errors=errors),
+            prompts.repair_prompt(previous=clean_previous, errors=clean_errors),
             stage=stage,
             max_tokens=max_tokens,
         )
