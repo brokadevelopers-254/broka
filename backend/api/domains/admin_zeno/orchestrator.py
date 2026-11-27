@@ -45,6 +45,7 @@ from api.domains.admin_zeno.constants import (
 from api.domains.admin_zeno.claims import (
     allowed_numbers,
     claim_errors,
+    numbers_in,
     text_fields,
     unsupported_numbers,
 )
@@ -61,7 +62,10 @@ from api.domains.admin_zeno.model_gateway import (
     extract_json,
     get_gateway,
 )
-from api.domains.admin_zeno.sanitizer import sanitize_model_context
+from api.domains.admin_zeno.sanitizer import (
+    sanitize_history,
+    sanitize_model_context,
+)
 from api.domains.admin_zeno.schemas import (
     Answer,
     ChatResponse,
@@ -202,6 +206,11 @@ class AdminZenoOrchestrator:
         history = await conversation_service.recent_turns(
             db, conversation_id=conversation_id, limit=MAX_CONTEXT_TURNS
         )
+        # Stored turns are re-sent to a provider on every later turn, and
+        # legacy ones predate the data boundary that produced today's answer.
+        # They are scrubbed here, once, so planning, synthesis and repair all
+        # see the same safe transcript and none of them can be the leak.
+        history, history_redactions = sanitize_history(history)
         # Snapshot authorisation before any tool can recover the session: the
         # permission check must not depend on an ORM object that a rollback
         # may have expired.
@@ -247,6 +256,11 @@ class AdminZenoOrchestrator:
             raise ModelUnavailable("The planner returned an unusable tool list.")
 
         limitations: list[str] = []
+        if history_redactions:
+            limitations.append(
+                "Earlier turns contained identifying details, which were withheld "
+                "from the model before this answer was produced."
+            )
         if len(requested) > MAX_TOOL_EXECUTIONS_PER_TURN:
             requested = requested[:MAX_TOOL_EXECUTIONS_PER_TURN]
             limitations.append(
@@ -495,6 +509,7 @@ class AdminZenoOrchestrator:
         if len(findings) > 6:
             errors.append("too many findings")
         valid_claims: list[Claim] = []
+        validated_by_finding: dict[int, list[Claim]] = {}
         for i, finding in enumerate(findings[:8]):
             if not isinstance(finding, dict):
                 errors.append(f"findings[{i}] is not an object")
@@ -531,6 +546,7 @@ class AdminZenoOrchestrator:
                     errors.extend(f"findings[{i}].{problem}" for problem in claim_problems)
                 else:
                     claims.append(claim)
+            validated_by_finding[i] = claims
             valid_claims.extend(claims)
 
         for field in ("possible_causes", "recommendations", "limitations",
@@ -553,23 +569,31 @@ class AdminZenoOrchestrator:
                 errors.append(f"{label} contains figures the evidence does not support")
 
         # A finding's statement may only use the figures of the evidence that
-        # finding cites (plus its own validated claims).
+        # finding cites, and a figure of its own must arrive as a validated
+        # claim. The authority is the server-verified claim, not a regular
+        # expression: the scan only detects that a number is present.
         for i, finding in enumerate(findings[:8]):
             if not isinstance(finding, dict):
                 continue
             statement = finding.get("statement")
-            if not isinstance(statement, str):
+            if not isinstance(statement, str) or not statement.strip():
                 continue
             refs = [r for r in (finding.get("evidence") or []) if isinstance(r, str)]
             cited = [by_key[r] for r in refs if r in by_key]
-            finding_claims = []
-            for raw in (finding.get("claims") or []):
-                try:
-                    finding_claims.append(Claim.model_validate(raw))
-                except ValidationError:
-                    continue
+            finding_claims = validated_by_finding.get(i, [])
+            # Labels and definitions are server-authored wording ("within 24
+            # hours"), so they may be quoted; a metric value may not.
+            statement_from_labels = allowed_numbers(
+                evidence=cited, server_text=limitations or [], include_values=False,
+            )
+            asserted = numbers_in(statement) - statement_from_labels
+            if asserted and not finding_claims:
+                errors.append(
+                    f"findings[{i}].statement states figures without a structured claim"
+                )
             finding_allowed = allowed_numbers(
                 evidence=cited, claims=finding_claims, server_text=limitations or [],
+                include_values=False,
             )
             if unsupported_numbers(statement, finding_allowed):
                 errors.append(

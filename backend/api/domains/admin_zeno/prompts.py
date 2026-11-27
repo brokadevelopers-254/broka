@@ -143,10 +143,18 @@ Rules for the answer:
   evidence, it is not known.
 - A claim's confidence may be weaker than the evidence's, never stronger: an estimated
   figure cannot be labelled measured.
-- Do not put any other number in the headline, summary, statements, causes or
-  recommendations. The backend rejects a number in free text that is not traceable to the
-  evidence. Wording such as "within 24 hours" is fine because it comes from a metric label.
+- Do not put any other number in the headline, summary, statements, causes,
+  recommendations, limitations or suggested questions. The backend rejects any number in
+  free text that is not traceable to the evidence. Wording such as "within 24 hours" is
+  fine because it comes from a metric label.
+- A finding's own figure must arrive as a structured claim. A number in a statement that no
+  claim carries is rejected even when the cited evidence happens to contain it.
 - If evidence is unavailable, put the reason in "limitations"; do not turn it into zero.
+  A limitation is prose like any other: it may not introduce a figure the evidence does not
+  prove (draw the reason from a metric's definition or an unavailable reason instead).
+- The earlier turns are a redacted transcript.   Markers such as "[redacted]", "[credential]"
+  or "[number]" stand in for withheld personal details: they are not data and must not be
+  interpreted, repeated as facts or guessed at.
 - Put explanations that are not directly measured in "possible_causes" and phrase them as
   possibilities, not facts.
 - Recommendations name the dashboard page (for example "/market" or "/revenue"). They do not

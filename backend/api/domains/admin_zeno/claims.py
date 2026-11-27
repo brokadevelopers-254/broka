@@ -35,11 +35,6 @@ DERIVATIONS = ("value", "previous_value", "delta", "pct_change")
 
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
-# Numbers a model legitimately writes as structure rather than as a business
-# figure ("two findings" is text; "0" as a floor). Kept deliberately tiny: a
-# business number must be supported by evidence.
-_STRUCTURAL = {"1", "2", "3", "4", "5", "6"}
-
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -171,17 +166,25 @@ def allowed_numbers(
     evidence: Iterable[Evidence],
     claims: Iterable[Claim] = (),
     server_text: Iterable[str] = (),
+    include_values: bool = True,
 ) -> set[str]:
     """Every number traceable to validated evidence or server-authored text.
 
     Free text may only repeat these figures. Labels and definitions are
     written by BROKA's own tools, so the period wording inside them
     ("within 24 hours") counts as supported.
+
+    ``include_values=False`` withholds the raw metric values: used for a
+    finding's own statement, where a figure must arrive through a structured
+    claim rather than be lifted straight out of the cited evidence. There is
+    no built-in allowance for small numbers - a number that is not proved is
+    rejected however it is written.
     """
-    allowed: set[str] = set(_STRUCTURAL)
+    allowed: set[str] = set()
     for item in evidence:
-        allowed |= _number_tokens(item.value, item.unit)
-        allowed |= _number_tokens(item.previous_value, item.unit)
+        if include_values:
+            allowed |= _number_tokens(item.value, item.unit)
+            allowed |= _number_tokens(item.previous_value, item.unit)
         allowed |= numbers_in(item.label)
         allowed |= numbers_in(item.definition)
         allowed |= numbers_in(item.unavailable_reason)
@@ -205,7 +208,9 @@ def text_fields(payload: dict) -> list[tuple[str, str]]:
 
     Finding statements are checked separately: a statement may only repeat
     figures from the evidence that finding itself cites, not any other
-    metric retrieved in the same investigation.
+    metric retrieved in the same investigation. ``related_pages`` are not
+    scanned for figures because a dashboard path is a route, not a metric;
+    they are bounded and shape-checked by the orchestrator instead.
     """
     out: list[tuple[str, str]] = []
     for key in ("headline", "summary"):
@@ -218,4 +223,12 @@ def text_fields(payload: dict) -> list[tuple[str, str]]:
                 for key in ("statement", "action", "rationale"):
                     if isinstance(item.get(key), str):
                         out.append((f"{field_name}[{i}].{key}", item[key]))
+    # Model-authored limitations are prose like any other: a figure the
+    # evidence cannot prove is not made true by being phrased as a caveat.
+    for i, item in enumerate(payload.get("limitations") or []):
+        if isinstance(item, str):
+            out.append((f"limitations[{i}]", item))
+    for i, item in enumerate(payload.get("suggested_questions") or []):
+        if isinstance(item, str):
+            out.append((f"suggested_questions[{i}]", item))
     return out

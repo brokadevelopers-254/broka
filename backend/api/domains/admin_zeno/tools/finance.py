@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from pydantic import Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import revenue as revenue_service
@@ -76,10 +76,16 @@ async def platform_revenue(db: AsyncSession, args: FinanceArgs) -> ToolOutput:
     )
 
 
-# A bounded scan of zero-amount rows is enough to find unpriced calls: an
+# A bounded read of zero-amount rows is enough to find unpriced calls: an
 # unpriced provider call is recorded at amount 0 with meta.unpriced or
 # meta.tokens_unknown (see api/core/cost_ledger.py). Never read the whole
 # ledger to answer one question.
+#
+# Which rows are zero-amount is decided by the database (exact counts per
+# kind), not by a bounded sample of the whole ledger, so a large period can
+# no longer hide unpriced spend inside rows 5,001 onwards. Only the meta
+# classification of those zero rows is bounded, and when even that does not
+# fit, the affected figures are reported as unavailable rather than measured.
 MAX_UNPRICED_SCAN = 5000
 
 COST_CATEGORIES = (
@@ -92,8 +98,39 @@ COST_CATEGORIES = (
 )
 
 
-async def _unpriced_by_kind(db: AsyncSession, start: datetime, end: datetime) -> tuple[dict[str, int], bool]:
-    """Unpriced rows per kind, from a bounded scan of zero-amount rows."""
+async def _zero_amount_counts(db: AsyncSession, start: datetime, end: datetime) -> dict[str, int]:
+    """Exact number of zero-amount rows per kind, aggregated by the database."""
+    rows = (await db.execute(
+        select(PlatformCost.kind, func.count(PlatformCost.id))
+        .where(
+            PlatformCost.created_at >= start,
+            PlatformCost.created_at < end,
+            PlatformCost.kind != CostKind.PAYMENT_FEE,
+            PlatformCost.amount_minor == 0,
+        )
+        .group_by(PlatformCost.kind)
+    )).all()
+    return {str(kind): int(count or 0) for kind, count in rows}
+
+
+async def _unpriced_by_kind(
+    db: AsyncSession, start: datetime, end: datetime
+) -> tuple[dict[str, int], dict[str, int], bool]:
+    """(unpriced rows per kind, zero-amount rows per kind, complete).
+
+    ``complete`` is False when the zero-amount rows exist but do not all fit
+    the bounded read, so their meta could not be classified. A kind with no
+    zero-amount rows is complete regardless: the database has already proved
+    there is nothing to classify. When ``complete`` is False no figure that
+    depends on unpriced spend may be presented as measured.
+    """
+    zero_counts = await _zero_amount_counts(db, start, end)
+    total_zero = sum(zero_counts.values())
+    if total_zero == 0:
+        return {}, zero_counts, True
+    complete = total_zero <= MAX_UNPRICED_SCAN
+    if not complete:
+        return {}, zero_counts, False
     rows = (await db.execute(
         select(PlatformCost.kind, PlatformCost.meta)
         .where(
@@ -102,15 +139,14 @@ async def _unpriced_by_kind(db: AsyncSession, start: datetime, end: datetime) ->
             PlatformCost.kind != CostKind.PAYMENT_FEE,
             PlatformCost.amount_minor == 0,
         )
-        .limit(MAX_UNPRICED_SCAN + 1)
+        .limit(MAX_UNPRICED_SCAN)
     )).all()
-    truncated = len(rows) > MAX_UNPRICED_SCAN
     counts: dict[str, int] = {}
-    for kind, meta in rows[:MAX_UNPRICED_SCAN]:
+    for kind, meta in rows:
         meta = meta or {}
         if meta.get("unpriced") or meta.get("tokens_unknown"):
             counts[str(kind)] = counts.get(str(kind), 0) + 1
-    return counts, truncated
+    return counts, zero_counts, True
 
 
 def _cost_evidence(
@@ -119,23 +155,27 @@ def _cost_evidence(
     label: str,
     kind: dict | None,
     unpriced: int,
-    scan_truncated: bool,
+    zero_rows: int,
+    classification_complete: bool,
     any_cost_rows: bool,
     start: datetime,
     end: datetime,
 ) -> Evidence:
     """Classify one cost category without ever turning absence into zero.
 
-    The five states are distinct: a measured zero (rows exist, all at zero,
-    none unpriced), no rows for the category, incomplete tracking, a figure
-    from an assumed rate, and unpriced rows.
+    The states are distinct: a measured zero (rows exist, all at zero, none
+    unpriced), no rows for the category, incomplete tracking, a figure from
+    an assumed rate, unpriced rows, and zero-amount rows that the bounded read
+    never classified (which is incomplete tracking too - the total is a floor,
+    not a measurement).
     """
     source = "api.core.revenue.revenue_report"
     if kind is None:
-        if scan_truncated:
+        if not classification_complete and zero_rows:
             reason = (
-                "Cost tracking could not be read completely for this period, so this is "
-                "not a verified zero."
+                f"{zero_rows} zero-amount rows could not be classified as priced or "
+                "unpriced within the bounded read, so this category is not a verified "
+                "zero and is not reported as one."
             )
         elif not any_cost_rows:
             reason = (
@@ -153,6 +193,19 @@ def _cost_evidence(
         )
     count = int(kind.get("count") or 0)
     amount = kind.get("amount_minor")
+    if not classification_complete and zero_rows:
+        # Zero-amount rows of this kind exist and their meta was never read:
+        # some of them may be unpriced, so the recorded total is a floor, not
+        # a measurement.
+        return unavailable_evidence(
+            metric_key=f"finance.cost.{key}", label=label, source=source,
+            reason=(
+                f"{zero_rows} zero-amount rows of this kind could not be classified "
+                "within the bounded read, so this total may omit unpriced spend and is "
+                "not reported as measured."
+            ),
+            definition="Operating spend recorded in BROKA's cost ledger.", unit="kes_minor",
+        )
     if unpriced:
         return unavailable_evidence(
             metric_key=f"finance.cost.{key}", label=label, source=source,
@@ -183,8 +236,11 @@ async def platform_costs(db: AsyncSession, args: FinanceArgs) -> ToolOutput:
     costs = report.get("costs") or {}
     by_kind = {k.get("key"): k for k in costs.get("kinds", [])}
     any_cost_rows = any(int(k.get("count") or 0) > 0 for k in by_kind.values())
-    unpriced_by_kind, scan_truncated = await _unpriced_by_kind(db, start, end)
+    unpriced_by_kind, zero_by_kind, classification_complete = await _unpriced_by_kind(
+        db, start, end
+    )
     unpriced_total = sum(unpriced_by_kind.values())
+    zero_rows_total = sum(zero_by_kind.values())
     estimated_total = int(costs.get("estimated_minor") or 0)
 
     evidence: list[Evidence] = []
@@ -195,6 +251,20 @@ async def platform_costs(db: AsyncSession, args: FinanceArgs) -> ToolOutput:
             reason=(
                 "No cost rows were recorded in this period. Absence of ledger entries does "
                 "not prove zero spend; cost tracking may be incomplete."
+            ),
+            definition="Operating spend recorded in BROKA's cost ledger.",
+        ))
+    elif not classification_complete:
+        # Zero-amount rows exist but their meta was not read, so unpriced
+        # spend cannot be separated from measured spend. The recorded total
+        # is a floor and presenting it as the figure would overstate profit.
+        evidence.append(unavailable_evidence(
+            metric_key="finance.costs_total_minor", label="Recorded platform costs",
+            source="api.core.revenue.revenue_report", unit="kes_minor",
+            reason=(
+                f"{zero_rows_total} zero-amount rows could not be classified as priced or "
+                "unpriced within the bounded read, so unpriced spend cannot be separated "
+                "from measured spend. The total is not reported as a measured figure."
             ),
             definition="Operating spend recorded in BROKA's cost ledger.",
         ))
@@ -222,30 +292,46 @@ async def platform_costs(db: AsyncSession, args: FinanceArgs) -> ToolOutput:
         period_start=start, period_end=end, confidence="estimated", href="/revenue",
     ))
     profit_confidence = "estimated" if (unpriced_total or estimated_total or not any_cost_rows) else "derived"
-    evidence.append(make_evidence(
-        metric_key="finance.profit_minor", label="Income less recorded costs",
-        value=report.get("profit_minor"), unit="kes_minor",
-        source="api.core.revenue.revenue_report",
-        definition=(
-            "Income minus recorded costs. A management figure, not an audited profit"
-            + ("; it excludes unpriced or unrecorded spend and therefore overstates profit."
-               if unpriced_total or not any_cost_rows else ".")
-        ),
-        period_start=start, period_end=end, confidence=profit_confidence, href="/revenue",
-    ))
-    evidence.append(make_evidence(
-        metric_key="finance.margin_pct", label="Margin", value=report.get("margin_pct"),
-        unit="percentage", source="api.core.revenue.revenue_report",
-        definition="Income less recorded costs, as a share of income.",
-        period_start=start, period_end=end, confidence=profit_confidence, href="/revenue",
-    ))
+    if not classification_complete:
+        for key, label, unit in (
+            ("finance.profit_minor", "Income less recorded costs", "kes_minor"),
+            ("finance.margin_pct", "Margin", "percentage"),
+        ):
+            evidence.append(unavailable_evidence(
+                metric_key=key, label=label,
+                source="api.core.revenue.revenue_report", unit=unit,
+                reason=(
+                    "Cost completeness cannot be verified for this period, so a profit "
+                    "figure would overstate the result and is not reported."
+                ),
+                definition="Income less recorded costs. A management figure, not an audited profit.",
+            ))
+    else:
+        evidence.append(make_evidence(
+            metric_key="finance.profit_minor", label="Income less recorded costs",
+            value=report.get("profit_minor"), unit="kes_minor",
+            source="api.core.revenue.revenue_report",
+            definition=(
+                "Income minus recorded costs. A management figure, not an audited profit"
+                + ("; it excludes unpriced or unrecorded spend and therefore overstates profit."
+                   if unpriced_total or not any_cost_rows else ".")
+            ),
+            period_start=start, period_end=end, confidence=profit_confidence, href="/revenue",
+        ))
+        evidence.append(make_evidence(
+            metric_key="finance.margin_pct", label="Margin", value=report.get("margin_pct"),
+            unit="percentage", source="api.core.revenue.revenue_report",
+            definition="Income less recorded costs, as a share of income.",
+            period_start=start, period_end=end, confidence=profit_confidence, href="/revenue",
+        ))
 
     for kind_key, label in COST_CATEGORIES:
         evidence.append(_cost_evidence(
             key=kind_key, label=label, kind=by_kind.get(kind_key),
             unpriced=unpriced_by_kind.get(kind_key, 0),
-            scan_truncated=scan_truncated, any_cost_rows=any_cost_rows,
-            start=start, end=end,
+            zero_rows=zero_by_kind.get(kind_key, 0),
+            classification_complete=classification_complete,
+            any_cost_rows=any_cost_rows, start=start, end=end,
         ))
 
     limitations = [
@@ -255,15 +341,19 @@ async def platform_costs(db: AsyncSession, args: FinanceArgs) -> ToolOutput:
         "rate record an unpriced row, not zero.",
         "A category with no recorded rows is reported as unavailable, never as zero spend.",
     ]
-    if scan_truncated:
+    if not classification_complete:
         limitations.append(
-            "The unpriced-row scan hit its bound; unpriced totals may be larger than reported."
+            f"{zero_rows_total} zero-amount cost rows exceeded the bounded classification "
+            "read. Totals, profit, margin and the affected categories are reported as "
+            "unavailable rather than as measured figures."
         )
     return ToolOutput(
         evidence=evidence,
         data={
             "costs": costs,
             "notes": report.get("notes", []),
+            "classification_complete": classification_complete,
+            "zero_amount_rows": zero_rows_total,
             "categories": {
                 kind_key: {
                     "available": next(
@@ -271,6 +361,9 @@ async def platform_costs(db: AsyncSession, args: FinanceArgs) -> ToolOutput:
                         False,
                     ),
                     "unpriced_rows": unpriced_by_kind.get(kind_key, 0),
+                    "zero_amount_rows": zero_by_kind.get(kind_key, 0),
+                    "complete": classification_complete
+                                or zero_by_kind.get(kind_key, 0) == 0,
                 }
                 for kind_key, _label in COST_CATEGORIES
             },

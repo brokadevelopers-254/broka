@@ -60,6 +60,26 @@ def _ai_rows(rows) -> dict:
     return buckets
 
 
+async def _unpriced_ai_calls(db: AsyncSession, start: datetime, end: datetime) -> int:
+    """Exact count of unpriced AI calls at every call site.
+
+    An unpriced call is the ledger's own marker: amount 0 with estimated=True
+    (no verified provider rate, or token counts the provider did not report -
+    see ``api.core.cost_ledger.ai_cost_minor``). It is a database count, so it
+    is exact regardless of ledger size and covers administrative Jarvis as
+    well as customer-facing Zeno.
+    """
+    return int((await db.execute(
+        select(func.count(PlatformCost.id)).where(
+            PlatformCost.kind == CostKind.AI,
+            PlatformCost.created_at >= start,
+            PlatformCost.created_at < end,
+            PlatformCost.amount_minor == 0,
+            PlatformCost.estimated.is_(True),
+        )
+    )).scalar() or 0)
+
+
 async def _ai_cost_facts(
     db: AsyncSession, start: datetime, end: datetime
 ) -> tuple[int, int, dict, bool]:
@@ -115,6 +135,7 @@ async def zeno_usage(db: AsyncSession, args: ZenoUsageArgs) -> ToolOutput:
     )).scalar() or 0)
 
     total_calls, total_amount, buckets, truncated = await _ai_cost_facts(db, start, end)
+    total_unpriced = await _unpriced_ai_calls(db, start, end)
 
     truncation_reason = (
         f"The AI cost ledger exceeded the bounded analysis window "
@@ -167,9 +188,23 @@ async def zeno_usage(db: AsyncSession, args: ZenoUsageArgs) -> ToolOutput:
                        bucket="admin", field="amount_minor", unit="kes_minor",
                        definition="Cost-ledger AI rows for administrative Jarvis call sites.",
                        confidence="estimated"),
-        split_evidence(key="ai_unpriced_calls", label="AI calls without a verified price",
+        # The all-call-sites figure is an exact database count, so it stays
+        # available even when the bounded split cannot be drawn. The two
+        # split figures below it are what makes it checkable per call site:
+        # administrative Jarvis usage must never disappear from this number.
+        simple(prefix="zeno", key="ai_unpriced_calls",
+               label="AI calls without a verified price (all call sites)",
+               value=total_unpriced, source="platform_costs",
+               definition="Exact database count of AI cost-ledger rows priced at zero with no verified rate or no reported token counts. Their cost is unknown, not zero.",
+               start=start, end=end, href="/zeno"),
+        split_evidence(key="ai_unpriced_calls_customer",
+                       label="Customer-facing AI calls without a verified price",
                        bucket="customer", field="unpriced",
-                       definition="Calls whose provider rate or token counts are unknown; their cost is not zero, it is unpriced."),
+                       definition="Calls attributed to customer-facing call sites whose provider rate or token counts are unknown."),
+        split_evidence(key="ai_unpriced_calls_admin",
+                       label="Administrative Jarvis AI calls without a verified price",
+                       bucket="admin", field="unpriced",
+                       definition="Calls attributed to admin_zeno call sites whose provider rate or token counts are unknown."),
     ]
     limitations = [
         "Response quality is not measured: BROKA has no evaluation mechanism for Zeno answers.",
@@ -185,6 +220,7 @@ async def zeno_usage(db: AsyncSession, args: ZenoUsageArgs) -> ToolOutput:
             "admin_ai": {**buckets["admin"], "complete": not truncated},
             "total_calls": total_calls,
             "total_amount_minor": total_amount,
+            "unpriced_calls_total": total_unpriced,
             "truncated": truncated,
             "note": (
                 "Administrative Jarvis usage is reported separately and is never included in "

@@ -132,6 +132,9 @@ async def recent_turns(
 
     Assistant turns are stored as their user-facing answer, not a reasoning
     trace, so this cannot leak private chain-of-thought into a later prompt.
+    The rows themselves are *not* trusted to be safe: a turn written before a
+    data boundary existed may contain anything, so the orchestrator scrubs this
+    list with ``sanitizer.sanitize_history`` before any prompt is built.
     """
     rows = list((await db.execute(
         select(AdminZenoTurn)

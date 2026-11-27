@@ -1,8 +1,8 @@
 """The model-context data boundary.
 
-Everything Jarvis sends to a model passes through here: the evidence objects
-and the supplementary tool payloads, *after* they have been serialized to
-plain data. This is deliberately not a per-tool check - a new tool cannot
+Everything Jarvis sends to a model that is not server-authored passes through
+here: the stored conversation history, the evidence objects and the
+supplementary tool payloads, *after* they have been serialized to plain data. This is deliberately not a per-tool check - a new tool cannot
 widen what reaches a provider by forgetting to redact in its own module.
 
 Two layers:
@@ -32,6 +32,13 @@ MAX_DATA_DEPTH = 4
 MAX_DICT_KEYS = 40
 MAX_LIST_ITEMS = 25
 MAX_STRING_CHARS = 300
+
+# Conversation history is re-sent to a provider on every turn, so it is the
+# one place where a *stored* string can leak after the data boundary that
+# produced the original answer has moved on. Legacy turns were written before
+# this boundary existed and are not trusted.
+MAX_HISTORY_TURNS = 12
+MAX_HISTORY_CHARS = 1200
 
 # Supplemental tool data a model may see, per registered tool. Aggregate and
 # non-identifying fields only. Everything else is dropped before prompting.
@@ -65,7 +72,7 @@ SAFE_TOOL_DATA_FIELDS: dict[str, tuple[str, ...]] = {
     "growth_engagement": ("engagement",),
     "growth_cohorts": ("cohorts", "definitions"),
     "growth_funnel": ("funnel", "definitions"),
-    "zeno_usage": ("customer_ai", "admin_ai", "note"),
+    "zeno_usage": ("customer_ai", "admin_ai", "unpriced_calls_total", "note"),
 }
 
 # Exact key names that carry identity, contact details, credentials or
@@ -92,6 +99,26 @@ _LONG_HEX_ID = re.compile(r"\b[0-9a-fA-F]{16,}\b")
 _PHONE = re.compile(r"(?<![\w.])\+?\d[\d\s()-]{7,}\d(?![\w.])")
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[T ].*)?$")
 _PEM = re.compile(r"-----BEGIN [A-Z ]+-----")
+
+# Free text in a stored turn has no keys to inspect, so identity has to be
+# recognised by its shape: a labelled value ("name: Jane"), a name written
+# after the role it belongs to ("seller Jane Wanjiru"), a credential
+# assignment, an e-mail, an id or a phone number.
+_LABELED_PII = re.compile(
+    r"\b(full name|name|customer|seller|buyer|account holder|phone(?:\s*number)?|"
+    r"e-?mail|id|account)\s*[:=]\s*[^\s,;]+(?:\s+[A-Z][a-z]+)?",
+    re.IGNORECASE,
+)
+_NAMED_ACCOUNT = re.compile(
+    r"\b(seller|buyer|customer|account|user|administrator)\s+"
+    r"(?:named\s+|called\s+)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+"
+)
+_CREDENTIAL = re.compile(
+    r"\bbearer\s+[A-Za-z0-9._\-]{8,}"
+    r"|\b(password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|secret|"
+    r"otp|pin)\s*[:=]\s*\S+",
+    re.IGNORECASE,
+)
 
 
 class _Drop:
@@ -121,6 +148,72 @@ def unsafe_key(key: Any) -> bool:
     if any(part in lowered for part in _FORBIDDEN_SUBSTRINGS):
         return True
     return bool(_EMAIL.search(key) or _UUID.search(key) or _PHONE.search(key))
+
+
+def scrub_free_text(value: str) -> tuple[str, int]:
+    """Redact identity-shaped tokens in free text, in place.
+
+    A stored turn cannot be dropped just because it mentions a phone number -
+    it is often the context that makes the next question intelligible - so the
+    identifying token is replaced and the rest of the sentence kept. Returns
+    the scrubbed text and how many redactions were made; the contents are
+    never logged.
+    """
+    cleaned = value
+    removed = 0
+    for pattern, replacement in (
+        (_CREDENTIAL, "[credential]"),
+        (_PEM, "[credential]"),
+        (_EMAIL, "[email]"),
+        (_UUID, "[id]"),
+        (_LONG_HEX_ID, "[id]"),
+        (_PHONE, "[number]"),
+    ):
+        cleaned, count = pattern.subn(replacement, cleaned)
+        removed += count
+    cleaned, count = _LABELED_PII.subn(
+        lambda match: f"{match.group(1)}: [redacted]", cleaned
+    )
+    removed += count
+    cleaned, count = _NAMED_ACCOUNT.subn(
+        lambda match: f"{match.group(1)} [name]", cleaned
+    )
+    removed += count
+    return cleaned, removed
+
+
+def sanitize_history(
+    turns: Iterable[dict[str, Any]],
+    *,
+    limit: int = MAX_HISTORY_TURNS,
+    chars: int = MAX_HISTORY_CHARS,
+) -> tuple[list[dict[str, Any]], int]:
+    """The only path from stored conversation turns into a prompt.
+
+    Planning, synthesis and repair all receive this list and nothing else, so
+    an unsafe legacy turn cannot reach a provider through one stage while
+    being withheld from another. Roles are re-derived here rather than copied,
+    content is scrubbed and bounded, and a turn that cannot be proven safe is
+    dropped whole.
+    """
+    out: list[dict[str, Any]] = []
+    removed = 0
+    for turn in list(turns)[-max(1, limit):]:
+        if not isinstance(turn, dict):
+            removed += 1
+            continue
+        role = turn.get("role")
+        content = turn.get("content")
+        if role not in ("user", "assistant") or not isinstance(content, str):
+            removed += 1
+            continue
+        cleaned, redactions = scrub_free_text(content)
+        removed += redactions
+        if not cleaned.strip():
+            removed += 1
+            continue
+        out.append({"role": role, "content": cleaned[:chars]})
+    return out, removed
 
 
 @dataclass
