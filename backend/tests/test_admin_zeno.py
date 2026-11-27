@@ -131,7 +131,10 @@ def _synthesis(*keys, headline="Verified headline", summary="Verified summary"):
         "headline": headline,
         "summary": summary,
         "findings": [
-            {"statement": f"Figure {i + 1} was retrieved.", "evidence": [k], "confidence": "measured"}
+            # No ordinal in the statement: since Phase 1.1.1 a number in a
+            # finding must be carried by a structured claim, and this fixture
+            # is about which evidence reached the model, not about figures.
+            {"statement": "A figure was retrieved.", "evidence": [k], "confidence": "measured"}
             for i, k in enumerate(keys)
         ],
         "possible_causes": [{"statement": "This may relate to recent activity."}],

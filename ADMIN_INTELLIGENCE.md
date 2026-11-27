@@ -300,12 +300,18 @@ confidence and a permitted derivation).
   per-tool allowlist and removes identifiers, names, contact details,
   credentials and message content at any depth. Trust outputs a count rather
   than a list of repeatedly reported accounts; marketplace outputs ranking
-  positions rather than seller or listing identities.
+  positions rather than seller or listing identities. Stored conversation
+  history is scrubbed by the same module before every planning, synthesis and
+  repair prompt: labelled names, credentials, e-mails, ids and phone numbers
+  become redaction markers, and a turn that cannot be made safe is dropped.
 - **Evidence rules**: an unavailable metric is `available: false` with a
   reason, never zero; estimated figures are labelled `estimated`; every
-  numerical finding carries structured claims validated server-side, free text
-  may not introduce an unsupported figure, and an answer that fails validation
-  is replaced with a verified-figures-only fallback.
+  numerical finding carries structured claims validated server-side (a figure
+  in a statement must be carried by one of that finding's own claims), free
+  text anywhere in the answer - summary, causes, recommendations, limitations
+  or suggested questions - may not introduce an unsupported figure, and an
+  answer that fails validation is replaced with a verified-figures-only
+  fallback.
 - **Briefing**: findings reference the exact evidence keys the briefing
   returns (validated before the response is built), the reported period is the
   requested interval (`now − window_days` to `now`, UTC), and the one-day
@@ -314,7 +320,10 @@ confidence and a permitted derivation).
   and BROKA never holds buyer or seller funds.
 - **Cost**: every successful Jarvis model call is recorded in the existing
   cost ledger with `call_site="admin_zeno.chat"`, separate from customer Zeno.
-  Unpriced calls remain unpriced, not zero.
+  Unpriced calls remain unpriced, not zero, and `zeno.ai_unpriced_calls`
+  counts them at every call site, with customer and administrative figures
+  available separately. Cost categories whose zero-amount rows exceed the
+  bounded classification read are reported unavailable, never as measured.
 - **Conversations**: two tables created by `create_all()`,
   `admin_zeno_conversations` and `admin_zeno_turns`; owner-scoped on every
   read/delete, 30-day retention refreshed per valid turn, enforced at read

@@ -239,6 +239,23 @@ customer:
 - Evidence whose label, definition or value cannot be proven safe is dropped
   whole rather than partially rewritten, so it cannot be cited.
 
+Stored conversation history is not exempt. Every later turn re-sends the
+earlier transcript to the provider, and a turn written before this boundary
+existed may contain anything an administrator or an older answer put there.
+`sanitizer.sanitize_history` is the only path from `admin_zeno_turns` into a
+prompt, and planning, synthesis and repair all receive its output rather than
+the raw rows:
+
+- Roles are re-derived (`user`/`assistant` only); any other shape is dropped.
+- Free text is scrubbed in place: labelled values (`name: …`), a name written
+after its role (`seller Jane …`), credentials, e-mail addresses, UUIDs and
+other long opaque ids, phone numbers and PEM blocks are replaced with
+`[redacted]`, `[name]`, `[credential]`, `[email]`, `[id]` or `[number]`.
+- A turn that is empty after scrubbing is dropped, and the transcript is
+bounded in turns and characters.
+- When anything was withheld the answer says so in a limitation. The
+  contents are never logged or echoed.
+
 The tools also redact at the source, so the boundary is not the only guard:
 the trust tool reduces `repeat_reported_users` to a count and a maximum, the
 marketplace tools rank sellers and listings instead of naming them, and
@@ -261,10 +278,19 @@ removed is logged.
 - Permitted derivations are only `value`, `previous_value`, `delta`
   (current − previous) and `pct_change` (rounded to one decimal). The model
   cannot invent its own arithmetic.
-- Free text is scanned for numbers. Headline, summary, causes and
-  recommendations may only repeat figures traceable to validated evidence or
-  server-authored metric labels/definitions/limitations; a finding's statement
-  may only use the figures of the evidence that finding cites.
+- Every figure in a finding's statement must arrive through one of its own
+  validated claims. The scan only detects that a number is present; the
+  authority is the server-verified claim (value, unit, derivation). There is
+  no allowance for small "structural" numbers: a `3` that no claim or metric
+  label supports is rejected like any other figure.
+- Free text is scanned for numbers. Headline, summary, causes,
+  recommendations, model-authored limitations and suggested questions may
+  only repeat figures traceable to validated evidence or server-authored
+  metric labels/definitions/limitations; a finding's statement may only use
+  the figures of its own claims and of the evidence that finding cites.
+- `related_pages` are validated as dashboard paths (single leading slash, no
+  scheme, bounded length) rather than scanned for figures: a route is not a
+  metric.
 - A metric that cannot be measured is `available: false`, `value: null`, with
   an `unavailable_reason`. It is never zero.
 - Confidence is one of `measured`, `derived`, `estimated`, `hypothesis` or
@@ -373,11 +399,19 @@ needed.
   flag is off. Reads already exclude expired rows; the sweep bounds storage.
 - Financial cost categories distinguish a measured zero from no recorded
   rows, incomplete tracking, assumed rates and unpriced rows; only the first
-  is reported as a measured zero.
+  is reported as a measured zero. Which rows are zero-amount is counted
+  exactly by the database per kind, so a large period cannot hide unpriced
+  spend beyond a bounded sample; only the meta classification of those rows
+  is bounded. When even that does not fit, the affected categories, total,
+  profit and margin are reported unavailable rather than measured.
 - Zeno AI cost totals come from exact database aggregates. The customer /
   administrative split needs row metadata, so it is read in bounded pages;
   when the ledger exceeds the bound the split is reported unavailable rather
   than from a partial sample.
+- `zeno.ai_unpriced_calls` is an exact database count across **all** call
+  sites (customer-facing Zeno and administrative Jarvis), so an unavailable
+  split cannot drop the administrative calls; `ai_unpriced_calls_customer`
+  and `ai_unpriced_calls_admin` expose the split when it is available.
 - Phase 1 has no semantic/vector memory and no cross-conversation learning.
 
 ## Tool execution and session recovery
