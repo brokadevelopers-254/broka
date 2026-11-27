@@ -2,8 +2,11 @@
 
 Aggregates only: counts of reports, complaints and moderation activity. No
 message content, call content, phone number or other customer-identifying
-data is read or sent to a model. Individual account investigation needs the
-existing narrower admin routes and is deliberately out of scope here.
+data is read or sent to a model. The underlying complaints service returns
+``repeat_reported_users`` with ids and names; this module reduces it to a
+count and a maximum before the payload can reach a prompt. Individual account
+investigation needs the existing narrower admin routes and is deliberately
+out of scope here.
 """
 from __future__ import annotations
 
@@ -102,6 +105,30 @@ async def trust_overview(db: AsyncSession, args: TrustArgs) -> ToolOutput:
                definition="Restrictions, suspensions and reinstatements recorded in the period.",
                start=start, end=end, href="/users"),
     ]
+    # Repeat reports matter as a pattern, not as a list of people. The
+    # service returns user ids and names; those never leave this function -
+    # only how many accounts were repeatedly reported and how many reports
+    # the worst one drew, which is what a model can legitimately discuss.
+    repeat_rows = complaints.get("repeat_reported_users") or []
+    repeat_accounts = len(repeat_rows)
+    max_reports = max(
+        (int(row.get("complaints_90d") or 0) for row in repeat_rows), default=0
+    )
+    evidence.append(simple(
+        prefix="trust", key="repeat_reported_accounts",
+        label="Accounts reported repeatedly in 90 days",
+        value=repeat_accounts, source=SOURCE,
+        definition=("Accounts with two or more complaints against them in the last 90 days. "
+                    "The accounts themselves are not exposed to Jarvis."),
+        href="/complaints",
+    ))
+    evidence.append(simple(
+        prefix="trust", key="repeat_reported_max_complaints",
+        label="Most complaints against a single account in 90 days",
+        value=max_reports, source=SOURCE,
+        definition="The highest complaint count for one repeatedly reported account.",
+        href="/complaints",
+    ))
     # Dispute states are an internal enum; exposing the valid set is useful
     # to nobody and confusing to read, so only the aggregate leaves the tool.
     del disputed_states
@@ -111,7 +138,8 @@ async def trust_overview(db: AsyncSession, args: TrustArgs) -> ToolOutput:
             "by_category": complaints.get("by_category", {}),
             "open_by_severity": complaints.get("open_by_severity", {}),
             "median_response_hours_90d": complaints.get("median_response_hours_90d"),
-            "repeat_reported_users": complaints.get("repeat_reported_users", []),
+            "repeat_reported_accounts": repeat_accounts,
+            "max_complaints_90d": max_reports,
             "sla_hours": complaints.get("sla_hours", {}),
             "note": PII_NOTE,
         },

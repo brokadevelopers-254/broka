@@ -1,4 +1,4 @@
-# Administrative Zeno (Jarvis Mode) — Phase 1 architecture
+# Administrative Zeno (Jarvis Mode) — Phase 1.1 architecture
 
 Zeno in Jarvis Mode is a dedicated, read-only administrative intelligence
 system at `/admin/zeno`. It answers an administrator's question by planning a
@@ -220,17 +220,62 @@ Failure responses:
 | 503 | `MODEL_UNAVAILABLE` | No provider produced a usable response; no answer was generated |
 | 504 | `INVESTIGATION_TIMEOUT` | Whole-turn limit exceeded |
 
+## Model-context privacy boundary
+
+No tool payload reaches a provider directly. `sanitizer.sanitize_model_context`
+runs on the serialized evidence and tool data immediately before the
+synthesis and repair prompts, and removes anything that could identify a
+customer:
+
+- An explicit allowlist (`SAFE_TOOL_DATA_FIELDS`) of the supplementary `data`
+  fields each registered tool may expose. A tool without an entry exposes no
+  data, and `tests/test_admin_zeno_phase11.py` fails if a registered tool has
+  no reviewed entry.
+- Recursive key filtering at every depth: `id`, `*_id`, names, e-mail, phone,
+  credentials, tokens, message and call content, plus any key that looks like
+  an opaque identifier.
+- Recursive value inspection: strings that look like an e-mail, UUID, phone
+  number or PEM key block are dropped; lists and dictionaries are bounded.
+- Evidence whose label, definition or value cannot be proven safe is dropped
+  whole rather than partially rewritten, so it cannot be cited.
+
+The tools also redact at the source, so the boundary is not the only guard:
+the trust tool reduces `repeat_reported_users` to a count and a maximum, the
+marketplace tools rank sellers and listings instead of naming them, and
+`founder_insights` summarises per-account insights as counts. Only the number
+of removed fields is reported (as a limitation), never their contents. Nothing
+removed is logged.
+
 ## Evidence rules
 
 - Every quantitative statement must cite evidence supplied in that turn.
   `orchestrator._validate_payload` rejects unknown `metric_key` references.
+- A citation alone is not proof of a figure. Each numerical finding carries
+  structured `claims` (`claims.py`): `metric_key`, `asserted_value`, `unit`,
+  `evidence_reference`, `derivation` and `confidence`. The backend verifies:
+  - the reference exists in this investigation and is available;
+  - `metric_key` matches the referenced evidence;
+  - the asserted value equals the evidence value (or a permitted derivation);
+  - the unit matches exactly;
+  - the confidence is not stronger than the evidence's confidence.
+- Permitted derivations are only `value`, `previous_value`, `delta`
+  (current − previous) and `pct_change` (rounded to one decimal). The model
+  cannot invent its own arithmetic.
+- Free text is scanned for numbers. Headline, summary, causes and
+  recommendations may only repeat figures traceable to validated evidence or
+  server-authored metric labels/definitions/limitations; a finding's statement
+  may only use the figures of the evidence that finding cites.
 - A metric that cannot be measured is `available: false`, `value: null`, with
   an `unavailable_reason`. It is never zero.
 - Confidence is one of `measured`, `derived`, `estimated`, `hypothesis` or
   `unavailable`. Bytes priced from assumed rates are `estimated`.
 - A synthesis that fails validation gets one bounded repair attempt and then
-  `evidence.fallback_response`: verified figures only, no interpretation.
+  `evidence.fallback_response`: verified figures only (each with a structured
+  claim), no interpretation. An invalid synthesis is never returned.
 - If no tool returns evidence, the answer says so and reports no numbers.
+- A failed database tool rolls back to its savepoint (see “Tool execution and
+  session recovery”), so the rest of the investigation can still produce an
+  evidence-backed answer.
 
 ## Model gateway and fallback
 
@@ -267,9 +312,15 @@ needed.
 - Ownership is part of every query; another administrator's conversation is
   `404`, indistinguishable from a missing one.
 - Deletion removes the turns explicitly, then the conversation.
-- `expires_at` is refreshed on every turn and is 30 days out.
-  `conversation_service.cleanup_expired` removes expired conversations and
-  their turns; it is safe to run repeatedly.
+- `expires_at` is refreshed only when a new valid turn is persisted, and is
+  30 days out. Touching an expired row never extends it.
+- Expiry is enforced at read time: `get_owned` and `list_conversations`
+  (including its total count) exclude `expires_at <= now`, so an expired
+  conversation is indistinguishable from a missing one immediately.
+- `conversation_service.cleanup_expired` removes expired conversations and
+  their turns; it is safe to run repeatedly. The sweep
+  (`workers.task_cleanup_admin_zeno_conversations`) runs regardless of
+  `ADMIN_ZENO_ENABLED`: the flag controls access, not retention.
 - Only the question, the user-facing answer, its evidence references and safe
   metadata are stored. No prompt, credential, reasoning trace or customer
   personal data.
@@ -318,14 +369,34 @@ needed.
 - Availability is not measured from outside; application-level samples cannot
   prove end-to-end uptime.
 - Retention cleanup runs in the existing 5-minute periodic sweep
-  (`workers.task_cleanup_admin_zeno_conversations`) and is a no-op while the
-  feature flag is off. Expiry bounds storage; access is always ownership-scoped.
+  (`workers.task_cleanup_admin_zeno_conversations`) even while the feature
+  flag is off. Reads already exclude expired rows; the sweep bounds storage.
+- Financial cost categories distinguish a measured zero from no recorded
+  rows, incomplete tracking, assumed rates and unpriced rows; only the first
+  is reported as a measured zero.
+- Zeno AI cost totals come from exact database aggregates. The customer /
+  administrative split needs row metadata, so it is read in bounded pages;
+  when the ledger exceeds the bound the split is reported unavailable rather
+  than from a partial sample.
 - Phase 1 has no semantic/vector memory and no cross-conversation learning.
+
+## Tool execution and session recovery
+
+Tools run sequentially on the request's `AsyncSession`, each inside a
+savepoint. A handler that raises a database error rolls back to that savepoint
+instead of poisoning the shared session, so the next tool in the same turn
+executes normally and the investigation can still answer from usable evidence.
+The registry logs the exception type only (never SQL, parameters or row data)
+and reports the generic category `data_unavailable`. Cancellation is re-raised,
+and a full session rollback is used only if the savepoint itself could not
+recover. Effective permissions are snapshotted before the tool loop and the
+conversation id is captured as a plain value, so recovery never touches an
+expired ORM object.
 
 ## Future extension points
 
-- Wire `cleanup_expired` into `api/core/workers.py`'s periodic sweep.
-- Add new tools by registering them in `tools/` — no orchestrator change.
+- Add new tools by registering them in `tools/` and adding its model-facing
+  data allowlist to `sanitizer.SAFE_TOOL_DATA_FIELDS` (a test enforces this).
 - Add proactive briefings by invoking `briefing_service.build_briefing` from a
   worker and persisting its output.
 - Add a narrower administrator role by giving tools narrower permissions; the
@@ -348,6 +419,15 @@ timeouts, failures), tool limits, evidence availability and reference
 validation, malformed model output and bounded repair, prompt injection,
 provider outage, deterministic briefing, alert deduplication, cache behaviour
 and preservation of `POST /admin/assistant/ask`.
+
+`backend/tests/test_admin_zeno_phase11.py` (43 tests) covers the remediation:
+model-context sanitisation and allowlist completeness, trust/marketplace/
+founder-insight redaction, serialized prompt inspection, claim validation
+(value, unit, confidence, derivations, unavailable and foreign evidence),
+free-text figure rejection, evidence-only fallback, briefing reference
+integrity and periods, read-time retention, cleanup while disabled, database
+session recovery, the five financial cost states and bounded Zeno cost
+aggregation with truncation reporting.
 
 The suite passes on SQLite and on PostgreSQL (via `tests.postgres_plugin`).
 Model calls are scripted in tests; CI never calls a live provider.

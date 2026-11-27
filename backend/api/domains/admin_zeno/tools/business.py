@@ -22,6 +22,21 @@ DOMAIN = "business"
 SOURCE = "api.core.command_center"
 
 
+def _is_identifying_insight(insight: dict) -> bool:
+    """Whether an insight names or keys a customer.
+
+    ``build_insights`` raises per-account repeated-complaint insights whose id
+    is ``repeat_reported:<user id>`` and whose title contains the person's
+    name; its waiting-buyers detail names a seller. Both stay out of the
+    model-facing payload.
+    """
+    insight_id = str(insight.get("id") or "")
+    if insight_id.startswith("repeat_reported"):
+        return True
+    detail = str(insight.get("detail") or "")
+    return insight_id == "buyers_waiting" and " has " in detail
+
+
 class BusinessArgs(ToolInput):
     window_days: int = Field(default=7, ge=1, le=90, description="Look-back window in days.")
 
@@ -36,7 +51,10 @@ async def business_overview(db: AsyncSession, args: BusinessArgs) -> ToolOutput:
                 prefix=f"business.{group.get('key')}",
                 metric=metric, source=SOURCE, start=start, end=end,
             ))
-    decisions = (report.get("decisions") or {}).get("insights") or []
+    decisions = [
+        d for d in ((report.get("decisions") or {}).get("insights") or [])
+        if not _is_identifying_insight(d)
+    ]
     limitations = [
         f"{e.label}: {e.unavailable_reason}" for e in evidence if not e.available
     ][:6]
@@ -44,9 +62,12 @@ async def business_overview(db: AsyncSession, args: BusinessArgs) -> ToolOutput:
         evidence=evidence[:32],
         data={
             "window_days": args.window_days,
+            "decisions_count": len(decisions),
+            # No ids, no action links, no detail: a decision id can embed a
+            # user id and its detail can name a seller (see insights.py).
             "decisions": [
-                {"id": d.get("id"), "severity": d.get("severity"), "area": d.get("area"),
-                 "title": d.get("title"), "href": d.get("href")}
+                {"severity": d.get("severity"), "area": d.get("area"),
+                 "title": d.get("title")}
                 for d in decisions[:8]
             ],
             "activity_coverage_started_on": report.get("activity_coverage_started_on"),
@@ -68,6 +89,18 @@ async def founder_insights(db: AsyncSession, args: FounderInsightsArgs) -> ToolO
     insights = build_insights(pulse=pulse, categories=categories, sellers=sellers)
     insights.sort(key=lambda d: ({"critical": 0, "warning": 1, "positive": 2}.get(d["severity"], 3),
                                  -float(d.get("weight") or 0)))
+
+    # A repeated-report insight names a customer and its id embeds their user
+    # id; a waiting-buyers detail names a seller. Neither may reach a model.
+    # The pattern is kept as an aggregate instead.
+    identifying = [i for i in insights if _is_identifying_insight(i)]
+    repeat_counts = [
+        int((i.get("evidence") or {}).get("complaints_90d") or 0)
+        for i in identifying
+        if str(i.get("id") or "").startswith("repeat_reported:")
+    ]
+    safe = [i for i in insights if not _is_identifying_insight(i)]
+
     evidence = [
         simple(
             prefix="business.insight", key=str(i["id"]).replace(":", "_")[:60],
@@ -77,18 +110,35 @@ async def founder_insights(db: AsyncSession, args: FounderInsightsArgs) -> ToolO
             unit="json", start=start, end=now, confidence="derived",
             href=(i["action"][1] if isinstance(i.get("action"), (list, tuple)) and len(i["action"]) > 1 else None),
         )
-        for i in insights[:10] if i.get("id")
+        for i in safe[:10] if i.get("id")
     ]
+    evidence.append(simple(
+        prefix="business.insight", key="repeat_reported_accounts",
+        label="Accounts with repeated complaints in 90 days",
+        value=len(repeat_counts), source="api.core.insights.build_insights",
+        definition="Accounts with two or more complaints against them. Identities are not exposed.",
+        start=start, end=now, confidence="derived", href="/complaints",
+    ))
+    evidence.append(simple(
+        prefix="business.insight", key="repeat_reported_max_complaints",
+        label="Most complaints against one account in 90 days",
+        value=max(repeat_counts, default=0), source="api.core.insights.build_insights",
+        definition="The highest complaint count for a repeatedly reported account.",
+        start=start, end=now, confidence="derived", href="/complaints",
+    ))
     return ToolOutput(
         evidence=evidence,
         data={
             "insights": [
-                {"severity": i.get("severity"), "area": i.get("area"), "title": i.get("title"),
-                 "detail": i.get("detail"), "action": i.get("action"), "evidence": i.get("evidence")}
-                for i in insights[:10]
-            ]
+                {"severity": i.get("severity"), "area": i.get("area"), "title": i.get("title")}
+                for i in safe[:10]
+            ],
+            "repeat_reported_accounts": len(repeat_counts),
+            "max_complaints_90d": max(repeat_counts, default=0),
         },
-        limitations=[],
+        limitations=[
+            "Insights that name or identify a customer are summarised as counts only.",
+        ],
     )
 
 

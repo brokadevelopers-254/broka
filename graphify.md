@@ -527,6 +527,7 @@ Counts: admin 132, optional 7, public 72, token 6, user 225.
 
 - `__init__.py` — Administrative Zeno - Jarvis Mode (Phase 1).
 - `briefing_service.py` — The initial intelligence briefing.
+- `claims.py` — Server-side validation of the figures a synthesized answer asserts.
 - `constants.py` — Central execution limits for administrative Zeno.
 - `conversation_service.py` — Administrator-owned Jarvis conversation persistence.
 - `evidence.py` — Evidence construction, inspection and validation.
@@ -535,6 +536,7 @@ Counts: admin 132, optional 7, public 72, token 6, user 225.
 - `orchestrator.py` — The Jarvis orchestration engine.
 - `prompts.py` — Administrative system prompts and prompt builders.
 - `router.py` — The /admin/zeno API.
+- `sanitizer.py` — The model-context data boundary.
 - `schemas.py` — Typed contracts for administrative Zeno.
 - `tool_registry.py` — The closed registry of approved, read-only intelligence tools.
 
@@ -1071,32 +1073,32 @@ of a change.
 `task_*` functions in `backend/api/core/workers.py`: the in-process sweep
 (every 5 minutes) and ARQ workers.
 
-- `task_ai_summary` (backend/api/core/workers.py:2597)
-- `task_backfill_media` (backend/api/core/workers.py:679) — Convert a bounded batch of base64 images into image assets.
-- `task_check_call_expiry` (backend/api/core/workers.py:986) — Backstop cleanup for stale call sessions (api/core/call_state.py).
-- `task_check_deal_timers` (backend/api/core/workers.py:1001) — Periodic sweep (see start_periodic_sweep): fires AI-announced auto-resolution timers once their deadline passes, IF the awaited party never…
-- `task_check_dispute_timers` (backend/api/core/workers.py:2228) — Sweep for DisputeTimer objects whose fires_at has passed.
-- `task_check_interest_nudges` (backend/api/core/workers.py:1582) — Periodic sweep (see start_periodic_sweep): if a buyer expressed interest in a listing and the seller hasn't replied within ~5 minutes, send…
+- `task_ai_summary` (backend/api/core/workers.py:2595)
+- `task_backfill_media` (backend/api/core/workers.py:677) — Convert a bounded batch of base64 images into image assets.
+- `task_check_call_expiry` (backend/api/core/workers.py:984) — Backstop cleanup for stale call sessions (api/core/call_state.py).
+- `task_check_deal_timers` (backend/api/core/workers.py:999) — Periodic sweep (see start_periodic_sweep): fires AI-announced auto-resolution timers once their deadline passes, IF the awaited party never…
+- `task_check_dispute_timers` (backend/api/core/workers.py:2226) — Sweep for DisputeTimer objects whose fires_at has passed.
+- `task_check_interest_nudges` (backend/api/core/workers.py:1580) — Periodic sweep (see start_periodic_sweep): if a buyer expressed interest in a listing and the seller hasn't replied within ~5 minutes, send…
 - `task_cleanup_admin_zeno_conversations` (backend/api/core/workers.py:660) — Delete administrative Zeno conversations past their 30-day retention.
-- `task_close_due_auctions` (backend/api/core/workers.py:2775) — Close auctions whose ends_at has passed, and hand winners to Deal.
-- `task_collect_abandoned_media` (backend/api/core/workers.py:688) — Remove uploads no listing, store or profile ever used, a week after they were made.
-- `task_expire_buy_agent_watches` (backend/api/core/workers.py:696) — End Zeno watches older than BUY_AGENT_WATCH_DAYS and tell their buyers.
-- `task_expire_featured_listings` (backend/api/core/workers.py:968)
-- `task_fraud_sweep` (backend/api/core/workers.py:2613)
-- `task_lapse_unpaid_auction_wins` (backend/api/core/workers.py:2951) — Release listings whose winner never paid.
-- `task_notify_auctions_ending_soon` (backend/api/core/workers.py:2869) — One reminder per auction, to everyone who has bid on it.
+- `task_close_due_auctions` (backend/api/core/workers.py:2773) — Close auctions whose ends_at has passed, and hand winners to Deal.
+- `task_collect_abandoned_media` (backend/api/core/workers.py:686) — Remove uploads no listing, store or profile ever used, a week after they were made.
+- `task_expire_buy_agent_watches` (backend/api/core/workers.py:694) — End Zeno watches older than BUY_AGENT_WATCH_DAYS and tell their buyers.
+- `task_expire_featured_listings` (backend/api/core/workers.py:966)
+- `task_fraud_sweep` (backend/api/core/workers.py:2611)
+- `task_lapse_unpaid_auction_wins` (backend/api/core/workers.py:2949) — Release listings whose winner never paid.
+- `task_notify_auctions_ending_soon` (backend/api/core/workers.py:2867) — One reminder per auction, to everyone who has bid on it.
 - `task_notify_expiry_alerts` (backend/api/core/workers.py:559) — Text sellers 2 days before a listing/store goes offline (pricing/expiry_alerts.py).
-- `task_process_service_communications` (backend/api/core/workers.py:943) — One bounded scheduler/delivery pass.
-- `task_recompute_dcr_and_leaks` (backend/api/core/workers.py:2008) — Volume 2 §3.7: nightly leak-flagging + DCR/rank_score recompute.
-- `task_recompute_trust_score` (backend/api/core/workers.py:905)
+- `task_process_service_communications` (backend/api/core/workers.py:941) — One bounded scheduler/delivery pass.
+- `task_recompute_dcr_and_leaks` (backend/api/core/workers.py:2006) — Volume 2 §3.7: nightly leak-flagging + DCR/rank_score recompute.
+- `task_recompute_trust_score` (backend/api/core/workers.py:903)
 - `task_reconcile_econfirm_escrows` (backend/api/core/workers.py:602) — Periodic sweep (Phase 8 of the E-Confirm integration): E-Confirm's callbacks aren't exposed to BROKA (per the integration spec), so this is…
-- `task_reconcile_mpesa` (backend/api/core/workers.py:2633) — Settle pending STK prompts from provider evidence, never from age.
+- `task_reconcile_mpesa` (backend/api/core/workers.py:2631) — Settle pending STK prompts from provider evidence, never from age.
 - `task_reconcile_zetupay_payments` (backend/api/core/workers.py:645) — Ask ZetuPay about BROKA's own charges (listing fees, plans, boosts, badges) whose webhook never came - a lost delivery, or a prompt that ti…
-- `task_refresh_dispute_summary_cache` (backend/api/core/workers.py:2215) — Keeps the platform-wide dispute-resolution summary (Volume 2 §2.3) warm.
-- `task_refresh_store_ratings` (backend/api/core/workers.py:1974) — Recompute every store's rating, and write today's snapshot.
-- `task_retrain_ml_models` (backend/api/core/workers.py:1932) — Volume 2 §4.3's weekly retrain job, plus §4.4's "start logging collecting features from day one" (feature_extraction's queries run regardle…
-- `task_send_email_notification` (backend/api/core/workers.py:2592)
-- `task_send_fcm_notification` (backend/api/core/workers.py:950)
+- `task_refresh_dispute_summary_cache` (backend/api/core/workers.py:2213) — Keeps the platform-wide dispute-resolution summary (Volume 2 §2.3) warm.
+- `task_refresh_store_ratings` (backend/api/core/workers.py:1972) — Recompute every store's rating, and write today's snapshot.
+- `task_retrain_ml_models` (backend/api/core/workers.py:1930) — Volume 2 §4.3's weekly retrain job, plus §4.4's "start logging collecting features from day one" (feature_extraction's queries run regardle…
+- `task_send_email_notification` (backend/api/core/workers.py:2590)
+- `task_send_fcm_notification` (backend/api/core/workers.py:948)
 - `task_store_order_sweep` (backend/api/core/workers.py:586) — Expire store orders whose store did not answer, or whose buyer did not confirm, in time - giving back any stock they reserved - and send th…
 - `task_sync_listing_stock` (backend/api/core/workers.py:570) — Show again a listing whose deals were refunded or cancelled, and mark one sold once every unit has been paid out (listings/stock.py).
 
@@ -1109,7 +1111,7 @@ Read by `backend/api/core/config.py`; documented in `.env.example` and
 
 ## Backend tests
 
-195 files in `backend/tests/`.
+196 files in `backend/tests/`.
 
 - `test_account_moderation.py` — Restriction, suspension and reinstatement, enforced by the backend.
 - `test_admin_additions.py` — Admin additions: SMS cost hook, timeseries, detail reads, users search.
@@ -1123,6 +1125,7 @@ Read by `backend/api/core/config.py`; documented in `.env.example` and
 - `test_admin_operations.py` — The operations workspace: samples added across processes, durable rows for payments, delivery and calls, and what is unavailable before sam…
 - `test_admin_revenue.py` — Revenue endpoint: income/cost/profit math, grouping, buckets, no double count.
 - `test_admin_zeno.py` — Administrative Zeno (Jarvis Mode) - Phase 1.
+- `test_admin_zeno_phase11.py` — Administrative Zeno (Jarvis Mode) - Phase 1.1 remediation.
 - `test_ai_broker_deepseek.py` — Tests for DeepSeek V4 Flash - DIRECT API integration in the AI broker (api/domains/ai_broker/service.py).
 - `test_ai_broker_v4.py` — Tests for AI broker with circuit breaker integration (v4.0).
 - `test_ai_connection_release.py` — No database connection is held while Zeno waits on a model.
@@ -2012,7 +2015,7 @@ Modules:
 ## Documents
 
 - `ADMIN_INTELLIGENCE.md` — Admin intelligence: activity, account status and the Command Center
-- `ADMIN_ZENO_ARCHITECTURE.md` — Administrative Zeno (Jarvis Mode) — Phase 1 architecture
+- `ADMIN_ZENO_ARCHITECTURE.md` — Administrative Zeno (Jarvis Mode) — Phase 1.1 architecture
 - `AGENTS.md` — Working on BROKA
 - `AI_AUDIT.md` — AI integration audit + cost controls (2026-09-14)
 - `ARCHITECTURE.md` — BROKA v4.0 — Architecture Guide

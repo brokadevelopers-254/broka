@@ -660,15 +660,13 @@ async def task_reconcile_zetupay_payments(ctx: dict | None = None) -> None:
 async def task_cleanup_admin_zeno_conversations(ctx: dict | None = None) -> int:
     """Delete administrative Zeno conversations past their 30-day retention.
 
-    A no-op while ADMIN_ZENO_ENABLED is off, so a deployment that never opted
-    into Jarvis carries no extra query. Expired conversations are already
-    unreachable (ownership lookups do not filter by expiry because expiry is
-    enforced by this sweep), so this bounds storage only.
+    Deliberately independent of ADMIN_ZENO_ENABLED: the flag controls access
+    to Jarvis, not whether administrative data already stored is entitled to
+    stay forever. Turning Jarvis off must still erase what it kept. Reads
+    already exclude expired rows (conversation_service.get_owned), so this
+    sweep bounds storage; it is safe to run repeatedly and deletes turns
+    explicitly rather than relying on database foreign keys.
     """
-    from api.core.config import settings
-
-    if not settings.admin_zeno_enabled:
-        return 0
     from api.database import AsyncSessionLocal
     from api.domains.admin_zeno import conversation_service
 

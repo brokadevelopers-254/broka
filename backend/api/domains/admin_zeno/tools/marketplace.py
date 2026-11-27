@@ -3,6 +3,10 @@
 Reuses ``api.core.market_intel`` and ``api.core.market_models``. Forecasts
 are only reported when the existing backtest published them; withheld
 forecasts are reported as withheld, never replaced with a guess.
+
+Seller and listing identities stop here. The underlying services return
+seller ids, names and listing ids; this module keeps only ranks and the
+aggregate performance figures, so no customer identity can reach a prompt.
 """
 from __future__ import annotations
 
@@ -72,11 +76,11 @@ async def listing_rankings(db: AsyncSession, args: RankingArgs) -> ToolOutput:
     report = await market_intel.rankings(db, window_days=args.window_days, limit=args.limit, now=end)
     listings = report.get("listings") or report.get("rankings") or report.get("top") or []
     evidence = []
-    for row in listings[: args.limit]:
-        lid = row.get("listing_id") or row.get("id")
+    for rank, row in enumerate(listings[: args.limit], start=1):
+        # Ranked, not named: a listing id or title would identify its seller.
         evidence.append(simple(
-            prefix="market.listing", key=str(lid)[:40],
-            label=f"Attention score: {row.get('name') or row.get('title') or lid}",
+            prefix="market.listing", key=f"rank{rank}.score",
+            label=f"Attention score of listing ranked {rank}",
             value=row.get("score"), unit="score",
             source="api.core.market_intel.rankings",
             definition="Weighted views, saves, likes, buyer contacts and negotiations.",
@@ -87,11 +91,11 @@ async def listing_rankings(db: AsyncSession, args: RankingArgs) -> ToolOutput:
         data={
             "count": len(listings),
             "listings": [
-                {k: row.get(k) for k in (
-                    "listing_id", "name", "title", "category", "county", "score",
-                    "views", "savers", "contacters", "negotiators", "deal_buyers",
-                ) if row.get(k) is not None}
-                for row in listings[: args.limit]
+                {"rank": rank, **{k: row.get(k) for k in (
+                    "category", "county", "score", "views", "savers", "contacters",
+                    "negotiators", "deal_buyers",
+                ) if row.get(k) is not None}}
+                for rank, row in enumerate(listings[: args.limit], start=1)
             ],
             "definitions": report.get("definitions", {}),
         },
@@ -118,16 +122,26 @@ async def marketplace_performance(db: AsyncSession, args: PerformanceArgs) -> To
             definition="Distinct buyers reaching this stage inside the window.",
             start=start, end=end, confidence="derived", href="/market",
         ))
-    for seller in (report.get("sellers") or {}).get("top", [])[:5]:
-        sid = seller.get("seller_id")
+    for rank, seller in enumerate((report.get("sellers") or {}).get("top", [])[:5], start=1):
+        # Sellers are ranked, never named or keyed by id: the model sees a
+        # performance distribution, not a person to accuse.
         evidence.append(simple(
-            prefix="market.seller", key=f"{sid}.contact_rate",
-            label=f"Buyer contact rate: {seller.get('name') or sid}",
+            prefix="market.seller", key=f"rank{rank}.contact_rate_pct",
+            label=f"Buyer contact rate of seller ranked {rank}",
             value=seller.get("contact_rate_pct"), unit="percentage",
             source="api.core.market_intel.performance",
             definition="Distinct contacters divided by distinct viewers across the seller's listings.",
             start=start, end=end, confidence="derived", href="/market",
         ))
+        if seller.get("avg_first_reply_minutes") is not None:
+            evidence.append(simple(
+                prefix="market.seller", key=f"rank{rank}.first_reply_minutes",
+                label=f"Average first reply time of seller ranked {rank}",
+                value=seller.get("avg_first_reply_minutes"), unit="minutes",
+                source="api.core.market_intel.performance",
+                definition="Minutes from a buyer's first message to the seller's first reply.",
+                start=start, end=end, confidence="derived", href="/market",
+            ))
     return ToolOutput(
         evidence=evidence,
         data={
@@ -136,11 +150,13 @@ async def marketplace_performance(db: AsyncSession, args: PerformanceArgs) -> To
             "browsers_without_contact": (report.get("buyers") or {}).get("browsers_without_contact"),
             "buyer_funnel": report.get("buyer_funnel", []),
             "top_sellers": [
-                {k: s.get(k) for k in (
-                    "seller_id", "name", "contact_rate_pct", "contacters", "viewers",
+                {"rank": rank, **{k: s.get(k) for k in (
+                    "contact_rate_pct", "contacters", "viewers",
                     "deals_agreed", "deals_completed", "avg_first_reply_minutes",
-                ) if s.get(k) is not None}
-                for s in (report.get("sellers") or {}).get("top", [])[: args.limit]
+                ) if s.get(k) is not None}}
+                for rank, s in enumerate(
+                    (report.get("sellers") or {}).get("top", [])[: args.limit], start=1
+                )
             ],
         },
         limitations=[

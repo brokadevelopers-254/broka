@@ -17,7 +17,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, Sequence
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.domains.admin_zeno.constants import (
@@ -61,10 +61,17 @@ async def create_conversation(
 async def get_owned(
     db: AsyncSession, *, conversation_id: str, admin_user_id: str
 ) -> Optional[AdminZenoConversation]:
+    """Fetch an unexpired, owned conversation.
+
+    Expiry is enforced at read time, not only by the background sweep: a
+    retention deadline that is only applied eventually is not a retention
+    policy. An expired conversation is indistinguishable from a missing one.
+    """
     return (await db.execute(
         select(AdminZenoConversation).where(
             AdminZenoConversation.id == conversation_id,
             AdminZenoConversation.admin_user_id == admin_user_id,
+            AdminZenoConversation.expires_at > datetime.utcnow(),
         )
     )).scalar_one_or_none()
 
@@ -74,14 +81,16 @@ async def list_conversations(
 ) -> tuple[list[AdminZenoConversation], int]:
     limit = max(1, min(int(limit), MAX_CONVERSATION_LIST_LIMIT))
     offset = max(0, int(offset))
+    live = (
+        AdminZenoConversation.admin_user_id == admin_user_id,
+        AdminZenoConversation.expires_at > datetime.utcnow(),
+    )
     total = int((await db.execute(
-        select(func.count(AdminZenoConversation.id)).where(
-            AdminZenoConversation.admin_user_id == admin_user_id
-        )
+        select(func.count(AdminZenoConversation.id)).where(*live)
     )).scalar() or 0)
     rows = (await db.execute(
         select(AdminZenoConversation)
-        .where(AdminZenoConversation.admin_user_id == admin_user_id)
+        .where(*live)
         .order_by(AdminZenoConversation.updated_at.desc(), AdminZenoConversation.id)
         .limit(limit)
         .offset(offset)
@@ -153,14 +162,39 @@ async def append_turn(
         created_at=now,
     )
     db.add(turn)
+    # Only a live conversation has its retention refreshed. Touching an
+    # expired row (or a stale reference to one) must not resurrect it.
     conversation = (await db.execute(
-        select(AdminZenoConversation).where(AdminZenoConversation.id == conversation_id)
+        select(AdminZenoConversation).where(
+            AdminZenoConversation.id == conversation_id,
+            AdminZenoConversation.expires_at > now,
+        )
     )).scalar_one_or_none()
     if conversation is not None:
         conversation.updated_at = now
         conversation.expires_at = _expiry(now)
     await db.commit()
     return turn
+
+
+async def set_default_title(
+    db: AsyncSession, *, conversation_id: str, title: str
+) -> None:
+    """Name a conversation after its first question, once.
+
+    An UPDATE keeps this working after a tool's database recovery expired ORM
+    objects loaded earlier in the same request (AGENTS.md: after a rollback,
+    do not touch objects loaded before it).
+    """
+    await db.execute(
+        update(AdminZenoConversation)
+        .where(
+            AdminZenoConversation.id == conversation_id,
+            AdminZenoConversation.title.in_(("", "New investigation")),
+        )
+        .values(title=_title_from(title)[:200], updated_at=datetime.utcnow())
+    )
+    await db.commit()
 
 
 async def delete_owned(
