@@ -43,6 +43,9 @@ from api.domains.admin_zeno.orchestrator import (
 )
 from api.domains.admin_zeno.sanitizer import (
     SAFE_TOOL_DATA_FIELDS,
+    UnsafeModelContext,
+    prepare_model_context,
+    sanitize_admin_message,
     sanitize_model_context,
 )
 from api.domains.admin_zeno.schemas import Claim, ToolInput, ToolOutput
@@ -1334,3 +1337,377 @@ async def test_unpriced_ai_total_survives_an_unavailable_split(setup_db, monkeyp
     assert by_key["zeno.ai_unpriced_calls"].value == 2
     for key in ("zeno.ai_unpriced_calls_customer", "zeno.ai_unpriced_calls_admin"):
         assert by_key[key].available is False
+
+
+# ── End-to-end model privacy: the current message and the actual payloads ────
+#
+# The tests above sanitize individual pieces. These drive a real gateway with a
+# fake *transport*, so what is inspected is the exact JSON each provider would
+# have received - not the sanitizer's own return value.
+
+NAME = "Jane Wanjiru"
+PHONE_KE = "0712345678"
+PHONE_INTL = "+44 7700 900123"
+EMAIL = "jane.wanjiru@example.com"
+USER_ID = str(uuid.uuid4())
+SELLER_ID = str(uuid.uuid4())
+API_TOKEN = "sk-live-Zx81nQpLm2Rt7Vb4"
+PASSWORD = "hunter2-Passw0rd!"
+LEGACY_PHONE = "+447700900456"
+LEGACY_EMAIL = "legacy.seller@example.com"
+
+ADMIN_MESSAGE = (
+    f"Why has {NAME}, {PHONE_KE}, stopped replying to buyers? "
+    f"She wrote from {EMAIL} and {PHONE_INTL}. "
+    f"user_id={USER_ID} seller_id={SELLER_ID} "
+    f"team token {API_TOKEN} password={PASSWORD}. "
+    "How are sellers performing overall?"
+)
+
+CANARIES = (
+    NAME, "Jane", "Wanjiru", PHONE_KE, "0712345678", PHONE_INTL,
+    "447700900123", EMAIL, USER_ID, SELLER_ID, API_TOKEN, PASSWORD,
+    LEGACY_PHONE, "447700900456", LEGACY_EMAIL,
+)
+
+LEGACY_TURNS = (
+    ("user", f"Investigate seller {NAME} on {PHONE_KE}"),
+    ("assistant",
+     f"{NAME} ({LEGACY_EMAIL}, {LEGACY_PHONE}) has a complaint from user {USER_ID}."),
+)
+
+
+class _FakeProviderResponse:
+    def __init__(self, content: str) -> None:
+        self._content = content
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return {
+            "choices": [{"message": {"content": self._content}}],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 60},
+        }
+
+
+def _install_provider_transport(monkeypatch, replies):
+    """Replace the provider HTTP client with one that records the exact body."""
+    from api.domains.admin_zeno import model_gateway as gateway_module
+
+    captured: list[dict] = []
+    scripted = list(replies)
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, json=None, headers=None, **kwargs):
+            captured.append({"url": url, "json": json, "headers": headers})
+            assert scripted, "the gateway made more provider calls than the test scripted"
+            return _FakeProviderResponse(scripted.pop(0))
+
+    monkeypatch.setattr(gateway_module.httpx, "AsyncClient", _Client)
+    return captured
+
+
+def _deepseek_only_gateway() -> AdminModelGateway:
+    gateway = AdminModelGateway()
+    gateway.gemini_key = None
+    gateway.openrouter_key = None
+    gateway.groq_key = None
+    gateway.deepseek_key = "test-deepseek-key"
+    return gateway
+
+
+def _serialized(captured) -> str:
+    return "\n".join(json.dumps(entry["json"], ensure_ascii=False) for entry in captured)
+
+
+def _stage_of(entry) -> str:
+    blob = json.dumps(entry["json"])
+    if "PLAN THIS INVESTIGATION" in blob:
+        return "planning"
+    if "SYNTHESIZE AN ANSWER" in blob:
+        return "synthesis"
+    if "The JSON you returned cannot be accepted" in blob:
+        return "repair"
+    return "other"
+
+
+def _assert_no_canary(blob: str) -> None:
+    for canary in CANARIES:
+        assert canary not in blob, f"an identifying value reached the provider: {canary!r}"
+
+
+async def _seed_legacy_conversation(admin_id: str, turns) -> str:
+    async with AsyncSessionLocal() as db:
+        conversation = await conversation_service.create_conversation(
+            db, admin_user_id=admin_id, title="Legacy investigation"
+        )
+        for role, content in turns:
+            await conversation_service.append_turn(
+                db, conversation_id=conversation.id, role=role, content=content
+            )
+        return conversation.id
+
+
+def _seller_plan():
+    return _plan({"name": "marketplace_performance",
+                  "arguments": {"window_days": 30, "limit": 5}})
+
+
+def _seller_synthesis():
+    return _synthesis([{
+        "statement": "The top-ranked seller leads the marketplace on contact rate.",
+        "evidence": ["market.seller.rank1.contact_rate_pct"],
+        "claims": [{
+            "metric_key": "market.seller.rank1.contact_rate_pct",
+            "asserted_value": 63, "unit": "percentage",
+            "evidence_reference": "market.seller.rank1.contact_rate_pct",
+            "derivation": "value", "confidence": "derived",
+        }],
+        "confidence": "derived",
+    }])
+
+
+def _fake_marketplace_performance(monkeypatch):
+    from api.core import market_intel
+
+    async def fake_performance(db, *, window_days, limit, now):
+        return {
+            "sellers": {"total": 4, "top": [{
+                "seller_id": SELLER_ID, "name": NAME, "phone": PHONE_KE,
+                "email": EMAIL, "contact_rate_pct": 63, "contacters": 5,
+                "viewers": 8, "deals_agreed": 1, "deals_completed": 1,
+                "avg_first_reply_minutes": 12.0,
+            }]},
+            "buyers": {"total": 9, "browsers_without_contact": 3},
+            "buyer_funnel": [{"key": "viewed", "label": "Viewed", "buyers": 9}],
+            "definitions": {},
+        }
+
+    monkeypatch.setattr(market_intel, "performance", fake_performance)
+
+
+# ── The current administrator message ───────────────────────────────────────
+
+
+def test_administrator_message_identity_becomes_a_reference():
+    result = sanitize_admin_message(
+        "Why has John Doe, 0712345678, failed to respond to buyers?"
+    )
+    # The business question survives; the person and the number do not.
+    assert result.text == (
+        "Why has [PERSON_1], [PHONE_1], failed to respond to buyers?"
+    )
+    kinds = {subject.reference: subject.kind for subject in result.subjects}
+    assert kinds == {"[PERSON_1]": "person", "[PHONE_1]": "phone"}
+
+
+def test_international_contact_details_and_identifiers_are_redacted():
+    result = sanitize_admin_message(
+        f"Check seller Ada Mwangi, {EMAIL}, {PHONE_INTL}, "
+        f"seller_id={SELLER_ID} and token {API_TOKEN}"
+    )
+    for canary in ("Ada", "Mwangi", EMAIL, "7700", SELLER_ID, API_TOKEN):
+        assert canary not in result.text
+    assert "[EMAIL_1]" in result.text
+    assert "[PHONE_1]" in result.text
+    assert any(subject.kind == "account_id" for subject in result.subjects)
+    assert any(subject.kind == "credential" for subject in result.subjects)
+    assert result.subjects[0].role == "seller" or any(
+        subject.role == "seller" for subject in result.subjects
+    )
+
+
+def test_name_with_no_regex_shape_is_still_redacted():
+    """The conservative fallback: an unlabelled name must not be trusted."""
+    result = sanitize_admin_message("Why did Peter Mwangi stop replying to buyers?")
+    assert "Peter" not in result.text and "Mwangi" not in result.text
+    assert "stop replying to buyers" in result.text
+    assert "[PERSON_1]" in result.text
+
+
+def test_domain_vocabulary_and_figures_survive_sanitization():
+    message = "Compare Nairobi County with Mombasa over the last 30 days, revenue was 15000000"
+    result = sanitize_admin_message(message)
+    assert result.text == message
+    assert not result.subjects
+
+
+def test_dashboard_context_is_projected_onto_known_fields():
+    prepared = prepare_model_context(
+        message="How are sellers performing this week?",
+        history=[],
+        dashboard_context={
+            "page": "/market",
+            "period_days": 7,
+            "secret": "should-not-travel",
+            "page_with_pii": f"/market?email={EMAIL}",
+        },
+    )
+    assert prepared.dashboard_context == {"page": "/market", "period_days": 7}
+
+    polluted = prepare_model_context(
+        message="How are sellers performing this week?",
+        history=[],
+        dashboard_context={"page": f"/market?email={EMAIL}", "period_days": 7},
+    )
+    assert polluted.dashboard_context == {"period_days": 7}
+
+
+# ── The payloads the provider actually receives ─────────────────────────────
+
+
+async def test_outbound_payloads_carry_no_identity_at_any_stage(actors, monkeypatch):
+    _fake_marketplace_performance(monkeypatch)
+    conversation_id = await _seed_legacy_conversation(actors["admin"].id, LEGACY_TURNS)
+    captured = _install_provider_transport(
+        monkeypatch, [json.dumps(_seller_plan()), json.dumps(_seller_synthesis())]
+    )
+
+    orchestrator = AdminZenoOrchestrator(
+        gateway=_deepseek_only_gateway(), registry=default_registry()
+    )
+    async with AsyncSessionLocal() as db:
+        response = await orchestrator.run(
+            db, actor=actors["admin"], message=ADMIN_MESSAGE,
+            conversation_id=conversation_id,
+        )
+
+    assert response.investigation.synthesis == "model"
+    assert [_stage_of(entry) for entry in captured] == ["planning", "synthesis"]
+
+    blob = _serialized(captured)
+    _assert_no_canary(blob)
+
+    planning = json.dumps(captured[0]["json"])
+    assert "[PERSON_1]" in planning
+    assert "[PHONE_1]" in planning
+    assert "[EMAIL_1]" in planning
+    assert "stopped replying to buyers" in planning
+    # The mapping itself never leaves the backend.
+    assert "reference" in planning and "mapping" in planning.lower()
+
+    synthesis = json.dumps(captured[1]["json"])
+    # Aggregate intelligence is still usable.
+    assert "market.seller.rank1.contact_rate_pct" in synthesis
+    assert "contact_rate_pct" in synthesis and "63" in synthesis
+
+    # The administrator's original message is what the protected store keeps.
+    async with AsyncSessionLocal() as db:
+        turns = await conversation_service.list_turns(
+            db, conversation_id=conversation_id, limit=40, offset=0
+        )
+    assert turns[-2].role == "user" and turns[-2].content == ADMIN_MESSAGE
+
+
+async def test_legacy_history_alone_cannot_reach_the_provider(actors, monkeypatch):
+    _fake_marketplace_performance(monkeypatch)
+    conversation_id = await _seed_legacy_conversation(actors["admin"].id, LEGACY_TURNS)
+    captured = _install_provider_transport(
+        monkeypatch, [json.dumps(_seller_plan()), json.dumps(_seller_synthesis())]
+    )
+
+    orchestrator = AdminZenoOrchestrator(
+        gateway=_deepseek_only_gateway(), registry=default_registry()
+    )
+    async with AsyncSessionLocal() as db:
+        await orchestrator.run(
+            db, actor=actors["admin"], message="How are sellers performing?",
+            conversation_id=conversation_id,
+        )
+
+    _assert_no_canary(_serialized(captured))
+
+
+async def test_synthesis_repair_payload_cannot_reintroduce_a_contact(actors, monkeypatch):
+    _fake_marketplace_performance(monkeypatch)
+    first_attempt = '{"headline": "Call ' + PHONE_INTL + ' about it"'
+    captured = _install_provider_transport(monkeypatch, [
+        json.dumps(_seller_plan()),
+        first_attempt,
+        json.dumps(_seller_synthesis()),
+    ])
+
+    orchestrator = AdminZenoOrchestrator(
+        gateway=_deepseek_only_gateway(), registry=default_registry()
+    )
+    async with AsyncSessionLocal() as db:
+        response = await orchestrator.run(
+            db, actor=actors["admin"], message=ADMIN_MESSAGE, conversation_id=None,
+        )
+
+    assert response.investigation.synthesis == "model"
+    assert [_stage_of(entry) for entry in captured] == [
+        "planning", "synthesis", "repair",
+    ]
+    _assert_no_canary(_serialized(captured))
+    assert "7700" not in json.dumps(captured[2]["json"])
+
+
+async def test_planning_repair_payload_is_clean(actors, monkeypatch):
+    _fake_marketplace_performance(monkeypatch)
+    captured = _install_provider_transport(monkeypatch, [
+        "not json at all",
+        json.dumps(_seller_plan()),
+        json.dumps(_seller_synthesis()),
+    ])
+
+    orchestrator = AdminZenoOrchestrator(
+        gateway=_deepseek_only_gateway(), registry=default_registry()
+    )
+    async with AsyncSessionLocal() as db:
+        await orchestrator.run(
+            db, actor=actors["admin"], message=ADMIN_MESSAGE, conversation_id=None,
+        )
+
+    assert [_stage_of(entry) for entry in captured] == [
+        "planning", "repair", "synthesis",
+    ]
+    _assert_no_canary(_serialized(captured))
+
+
+# ── The gateway's final enforcement boundary ────────────────────────────────
+
+
+async def test_gateway_refuses_unsafe_prompt_before_any_transport(monkeypatch):
+    captured = _install_provider_transport(monkeypatch, ["{}"])
+    gateway = _deepseek_only_gateway()
+
+    with pytest.raises(UnsafeModelContext):
+        await gateway.complete("Send this to jane@example.com today.", stage="synthesis")
+    assert captured == [], "nothing may be sent when a prompt cannot be proven safe"
+
+    with pytest.raises(UnsafeModelContext):
+        await gateway._call_deepseek("Call 0712345678 about the deal.", 100)
+    assert captured == []
+
+    # A clean administrative prompt still goes through.
+    reply = await gateway.complete("Summarise sellers_total 9 and rank 1.", stage="planning")
+    assert reply.text == "{}"
+    assert len(captured) == 1
+
+
+async def test_chat_endpoint_refuses_a_question_that_cannot_be_made_safe(client, actors, monkeypatch):
+    from api.domains.admin_zeno import orchestrator as orch
+
+    gateway = RecordingGateway(_plan())
+    monkeypatch.setattr(
+        orch, "_orchestrator", AdminZenoOrchestrator(gateway=gateway)
+    )
+    r = await client.post(
+        "/admin/zeno/chat",
+        headers=_h(actors["admin"].id),
+        json={"message": f"{PHONE_KE} {EMAIL}"},
+    )
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"]["code"] == "MODEL_CONTEXT_UNSAFE"
+    assert gateway.prompts == [], "an unsafe question must not reach the gateway"

@@ -41,6 +41,28 @@ Your rules:
 """
 
 
+def _subjects_block(subjects: list[dict[str, Any]] | None) -> str:
+    """The withheld references, as handles only.
+
+    The administrator's question may name a seller, buyer or account. Those
+    details are replaced before the request is built; the model only ever sees
+    a handle, its kind and the role the administrator stated. The mapping back
+    to the real account stays in the backend, so neither repeating nor guessing
+    a handle can disclose it.
+    """
+    if not subjects:
+        return ""
+    return f"""
+WITHHELD REFERENCES (details removed before this request; the mapping is backend-only):
+{json.dumps(subjects, ensure_ascii=False)}
+- Placeholders such as [PERSON_1], [PHONE_1], [EMAIL_1], [ID_1] or [SUBJECT_1] are not
+  names or values. Never guess, ask for, or reconstruct what they stand for, and never
+  repeat them as facts about a person.
+- No individual account record is available to you. If the question is about one account,
+  answer only from aggregate evidence and say that individual records are not accessible here.
+"""
+
+
 def _transcript(turns: Iterable[dict[str, Any]], limit: int, chars: int) -> str:
     rows = list(turns)[-limit:]
     if not rows:
@@ -62,6 +84,7 @@ def planning_prompt(
     max_tools: int,
     max_context_turns: int,
     max_context_chars: int,
+    subjects: list[dict[str, Any]] | None = None,
 ) -> str:
     return f"""{ADMIN_SYSTEM_PROMPT}
 
@@ -72,7 +95,7 @@ Administrator question:
 
 Context supplied by the dashboard (may be empty):
 {json.dumps(context or {}, ensure_ascii=False)}
-
+{_subjects_block(subjects)}
 Recent conversation:
 {_transcript(history, max_context_turns, max_context_chars)}
 
@@ -108,6 +131,7 @@ def synthesis_prompt(
     history: list[dict[str, Any]],
     max_context_turns: int,
     max_context_chars: int,
+    subjects: list[dict[str, Any]] | None = None,
 ) -> str:
     return f"""{ADMIN_SYSTEM_PROMPT}
 
@@ -118,7 +142,7 @@ Administrator question:
 
 Context supplied by the dashboard:
 {json.dumps(context or {}, ensure_ascii=False)}
-
+{_subjects_block(subjects)}
 Recent conversation:
 {_transcript(history, max_context_turns, max_context_chars)}
 
